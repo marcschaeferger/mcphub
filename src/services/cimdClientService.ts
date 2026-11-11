@@ -19,10 +19,20 @@ import { findOAuthClientById } from '../models/OAuth.js';
 import { assertSafeUrl, createRedirectValidatingFetch, type SsrfLookup } from '../utils/ssrf.js';
 import type { IOAuthClient } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import {
+  MAX_CLIENT_NAME_LENGTH,
+  MAX_CONTACTS,
+  MAX_CONTACT_LENGTH,
+  MAX_REDIRECT_URIS,
+  MAX_URI_LENGTH,
+} from '../utils/oauthClientMetadata.js';
 
 const METADATA_FETCH_TIMEOUT_MS = 5_000;
 const DEFAULT_CACHE_TTL_MS = 3_600_000;
 const MAX_DOCUMENT_BYTES = 256 * 1024;
+// client_ids are attacker-chosen URLs resolved before any login, so the cache
+// must be bounded; otherwise every unique URL adds a permanent entry.
+export const MAX_CIMD_CACHE_ENTRIES = 1000;
 
 export const isCimdClientId = (clientId: string): boolean => {
   return typeof clientId === 'string' && clientId.startsWith('https://');
@@ -91,7 +101,14 @@ export const getCimdSettings = async (): Promise<CimdSettings> => {
 };
 
 const asStringArray = (value: unknown): string[] | undefined =>
-  Array.isArray(value) && value.every((v) => typeof v === 'string') ? (value as string[]) : undefined;
+  Array.isArray(value) && value.every((v) => typeof v === 'string')
+    ? (value as string[])
+    : undefined;
+
+const isOversizedList = (values: string[] | undefined, maxEntries: number, maxLength: number) =>
+  values !== undefined && (values.length > maxEntries || values.some((v) => v.length > maxLength));
+
+const URI_FIELDS = ['logo_uri', 'client_uri', 'policy_uri', 'tos_uri', 'jwks_uri'] as const;
 
 /**
  * Validate a fetched metadata document and map it onto an IOAuthClient.
@@ -113,6 +130,22 @@ export const mapCimdDocument = (
 
   const redirectUris = asStringArray(document.redirect_uris);
   if (!redirectUris || redirectUris.length === 0 || !redirectUris.every((uri) => uri)) {
+    return undefined;
+  }
+
+  // Same bounds as dynamic client registration: the mapped client is cached and
+  // shown on the consent screen, so oversized documents are rejected.
+  const contactsValue = asStringArray(document.contacts);
+  if (
+    isOversizedList(redirectUris, MAX_REDIRECT_URIS, MAX_URI_LENGTH) ||
+    isOversizedList(contactsValue, MAX_CONTACTS, MAX_CONTACT_LENGTH) ||
+    (typeof document.client_name === 'string' &&
+      document.client_name.length > MAX_CLIENT_NAME_LENGTH) ||
+    URI_FIELDS.some((field) => {
+      const value = document[field];
+      return typeof value === 'string' && value.length > MAX_URI_LENGTH;
+    })
+  ) {
     return undefined;
   }
 
@@ -143,14 +176,67 @@ export const mapCimdDocument = (
     metadata: {
       application_type: applicationType,
       ...(contacts ? { contacts } : {}),
-      ...(optionalUriField(document.logo_uri) ? { logo_uri: optionalUriField(document.logo_uri) } : {}),
-      ...(optionalUriField(document.client_uri) ? { client_uri: optionalUriField(document.client_uri) } : {}),
-      ...(optionalUriField(document.policy_uri) ? { policy_uri: optionalUriField(document.policy_uri) } : {}),
-      ...(optionalUriField(document.tos_uri) ? { tos_uri: optionalUriField(document.tos_uri) } : {}),
-      ...(optionalUriField(document.jwks_uri) ? { jwks_uri: optionalUriField(document.jwks_uri) } : {}),
+      ...(optionalUriField(document.logo_uri)
+        ? { logo_uri: optionalUriField(document.logo_uri) }
+        : {}),
+      ...(optionalUriField(document.client_uri)
+        ? { client_uri: optionalUriField(document.client_uri) }
+        : {}),
+      ...(optionalUriField(document.policy_uri)
+        ? { policy_uri: optionalUriField(document.policy_uri) }
+        : {}),
+      ...(optionalUriField(document.tos_uri)
+        ? { tos_uri: optionalUriField(document.tos_uri) }
+        : {}),
+      ...(optionalUriField(document.jwks_uri)
+        ? { jwks_uri: optionalUriField(document.jwks_uri) }
+        : {}),
     },
   };
 };
+
+const readBodyWithLimit = async (
+  response: Response,
+  maxBytes: number,
+): Promise<string | undefined> => {
+  if (!response.body) {
+    const text = await response.text();
+    return Buffer.byteLength(text, 'utf8') > maxBytes ? undefined : text;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+};
+
+const storeInCache = (clientId: string, entry: CacheEntry): void => {
+  cache.delete(clientId);
+  if (cache.size >= MAX_CIMD_CACHE_ENTRIES) {
+    const now = Date.now();
+    for (const [key, value] of cache) {
+      if (value.expiresAt <= now) cache.delete(key);
+    }
+    // Map iteration follows insertion order, so the first keys are the oldest.
+    for (const key of cache.keys()) {
+      if (cache.size < MAX_CIMD_CACHE_ENTRIES) break;
+      cache.delete(key);
+    }
+  }
+  cache.set(clientId, entry);
+};
+
+/** Test seam: number of cached CIMD clients. */
+export const getCimdCacheSizeForTesting = (): number => cache.size;
 
 const fetchCimdDocument = async (clientIdUrl: string): Promise<IOAuthClient | undefined> => {
   await assertSafeUrl(clientIdUrl, {
@@ -188,8 +274,10 @@ const fetchCimdDocument = async (clientIdUrl: string): Promise<IOAuthClient | un
 
   let document: CimdDocument;
   try {
-    const text = await response.text();
-    if (text.length > MAX_DOCUMENT_BYTES) {
+    // Content-Length is optional (chunked responses), so enforce the limit while
+    // reading instead of buffering the whole body first.
+    const text = await readBodyWithLimit(response, MAX_DOCUMENT_BYTES);
+    if (text === undefined) {
       logger.warn('CIMD metadata document exceeds size limit', { clientIdUrl });
       return undefined;
     }
@@ -225,6 +313,9 @@ export const resolveCimdClient = async (
   if (cached && cached.expiresAt > now) {
     return cached.client;
   }
+  if (cached) {
+    cache.delete(clientId);
+  }
 
   const existingFetch = inflight.get(clientId);
   if (existingFetch) {
@@ -234,7 +325,7 @@ export const resolveCimdClient = async (
   const fetchPromise = fetchCimdDocument(clientId)
     .then((client) => {
       if (client) {
-        cache.set(clientId, { client, expiresAt: Date.now() + resolvedSettings.cacheTtlMs });
+        storeInCache(clientId, { client, expiresAt: Date.now() + resolvedSettings.cacheTtlMs });
       }
       return client;
     })

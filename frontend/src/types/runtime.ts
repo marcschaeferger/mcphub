@@ -39,7 +39,7 @@ export interface OAuthConsentContext {
   state?: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
-  token?: string;
+  consentTicket?: string;
   resource?: ResourceTarget;
   client?: ConsentClientInfo;
 }

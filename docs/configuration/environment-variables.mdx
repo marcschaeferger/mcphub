@@ -44,6 +44,7 @@ The configured segment is reserved for Smart Routing. Startup rejects existing s
 | Variable | Default | Description |
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | random (`admin123` in `pnpm dev`) | Password seeded for the bootstrap `admin` user when no users exist yet. If unset, `pnpm dev` uses `admin123`; other starts generate a 24-character random password and print it to the logs. |
+| `MCPHUB_ALLOW_QUERY_TOKEN` | `false` | Accept the dashboard JWT from a `?token=` query parameter on `/api` and `/oauth/authorize` (legacy). Off by default because URLs end up in proxy logs and browser history. |
 | `JWT_SECRET` | random per-process | Secret used to sign JWTs issued by `/api/auth/login`. See the warning below — this **must** be set explicitly in any non-development deployment. |
 
 <Warning>

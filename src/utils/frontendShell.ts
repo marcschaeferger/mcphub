@@ -49,7 +49,7 @@ export type OAuthConsentContext = {
   state?: string;
   codeChallenge?: string;
   codeChallengeMethod?: string;
-  token?: string;
+  consentTicket?: string;
   // RFC 8707 `resource` — which MCPHub target the client wants to access.
   resource?: ResourceTarget;
   // RFC 7591 client identity / trust metadata (populated when registered).

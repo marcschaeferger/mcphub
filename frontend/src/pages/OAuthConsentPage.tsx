@@ -41,7 +41,9 @@ const OAuthConsentPage: React.FC = () => {
         {context.codeChallengeMethod ? (
           <input type="hidden" name="code_challenge_method" value={context.codeChallengeMethod} />
         ) : null}
-        {context.token ? <input type="hidden" name="token" value={context.token} /> : null}
+        {context.consentTicket ? (
+          <input type="hidden" name="consent_ticket" value={context.consentTicket} />
+        ) : null}
         <input type="hidden" name="allow" value={allow} />
       </>
     );

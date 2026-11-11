@@ -1,4 +1,5 @@
 import { resolveJwtUser } from '../utils/userSession.js';
+import { isQueryTokenAllowed, verifyUrlTicket } from '../utils/urlTicket.js';
 import { Request, Response, NextFunction } from 'express';
 import defaultConfig from '../config/index.js';
 import { getBearerKeyDao, getSystemConfigDao } from '../dao/index.js';
@@ -173,10 +174,33 @@ export const auth = async (req: Request, res: Response, next: NextFunction): Pro
     }
   }
 
-  // Get token from header or query parameter
+  // Get token from header. The session JWT is no longer accepted from the
+  // query string (it leaked into proxy logs/history); EventSource log streams
+  // use a short-lived ticket instead. MCPHUB_ALLOW_QUERY_TOKEN=true opts back in.
   const headerToken = req.header('x-auth-token');
-  const queryToken = req.query.token as string;
+  const queryToken =
+    isQueryTokenAllowed() && typeof req.query.token === 'string' ? req.query.token : undefined;
   const token = headerToken || queryToken;
+
+  if (
+    !token &&
+    req.method === 'GET' &&
+    req.path.endsWith('/logs/stream') &&
+    typeof req.query.ticket === 'string'
+  ) {
+    const ticketUser = await verifyUrlTicket(req.query.ticket, 'log-stream');
+    if (!ticketUser) {
+      res.status(401).json({ success: false, message: 'Token is not valid' });
+      return;
+    }
+    (req as any).user = {
+      username: ticketUser.username,
+      isAdmin: ticketUser.isAdmin || false,
+      userGroups: ticketUser.userGroups,
+    };
+    next();
+    return;
+  }
 
   if (!token && routingConfig.skipAuth && isDashboardApiRequest(req)) {
     (req as any).user = createSkipAuthUser();

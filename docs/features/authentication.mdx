@@ -23,7 +23,7 @@ The dashboard API supports the following authentication paths (configured forwar
 
 1. **Bearer key** — a static token created from the dashboard or `/api/auth/keys`.
 2. **Better Auth session cookie** — issued by GitHub / Google login (optional).
-3. **JWT** — issued by `POST /api/auth/login`, sent via the `x-auth-token` header or `?token=` query.
+3. **JWT** — issued by `POST /api/auth/login`, sent via the `x-auth-token` header. It is not accepted from a `?token=` query unless `MCPHUB_ALLOW_QUERY_TOKEN=true`; the log stream and OAuth consent use short-lived, purpose-bound tickets instead.
 4. **`skipAuth` guest** — only when `systemConfig.routing.skipAuth` is `true`, the dashboard API treats unauthenticated calls as a synthetic admin `guest` user.
 
 All persistent user records are stored as `{ username, password, isAdmin }`. There are no `manager` or `viewer` roles; permissions are binary (admin or not). Social accounts that log in via Better Auth live in a separate `mcphub_better_auth_*` table but are mapped to the same `username` / `isAdmin` shape at request time.

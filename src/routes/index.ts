@@ -109,6 +109,7 @@ import {
 } from '../controllers/discoveryController.js';
 import { login, register, getCurrentUser, changePassword } from '../controllers/authController.js';
 import { getAllLogs, clearLogs, streamLogs } from '../controllers/logController.js';
+import { createUrlTicket } from '../controllers/urlTicketController.js';
 import {
   getRuntimeConfig,
   getPublicConfig,
@@ -509,6 +510,8 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   authenticatedRouter.get('/logs', getAllLogs);
   authenticatedRouter.delete('/logs', clearLogs);
   authenticatedRouter.get('/logs/stream', streamLogs);
+  // Short-lived, purpose-bound tickets for URLs (log stream, OAuth consent).
+  authenticatedRouter.post('/url-tickets', createUrlTicket);
 
   // MCP settings export route
   authenticatedRouter.get('/mcp-settings/export', getMcpSettingsJson);

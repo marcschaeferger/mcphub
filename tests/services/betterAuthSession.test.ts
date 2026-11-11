@@ -106,7 +106,7 @@ describe('resolveBetterAuthUser', () => {
   describe('Priority 2: email match (legacy fallback)', () => {
     it('should match by email when ssoUserId is not found', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: 'ba-new', email: 'legacy@example.com', name: 'Legacy' },
+        user: { id: 'ba-new', email: 'legacy@example.com', name: 'Legacy', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(undefined);
       mockFindByEmail.mockResolvedValue({
@@ -126,7 +126,7 @@ describe('resolveBetterAuthUser', () => {
 
     it('should backfill ssoUserId on email match', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: 'ba-456', email: 'user@example.com', name: 'User' },
+        user: { id: 'ba-456', email: 'user@example.com', name: 'User', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(undefined);
       mockFindByEmail.mockResolvedValue({
@@ -144,7 +144,7 @@ describe('resolveBetterAuthUser', () => {
 
     it('should not backfill ssoUserId when session has no user.id', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: undefined, email: 'user@example.com' },
+        user: { id: undefined, email: 'user@example.com', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(undefined);
       mockFindByEmail.mockResolvedValue({
@@ -164,7 +164,7 @@ describe('resolveBetterAuthUser', () => {
   describe('Priority 3: username match', () => {
     it('should match by username and backfill both ssoUserId and email', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: 'ba-789', email: 'old@example.com', name: 'Old' },
+        user: { id: 'ba-789', email: 'old@example.com', name: 'Old', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(undefined);
       mockFindByEmail.mockResolvedValue(undefined);
@@ -185,7 +185,7 @@ describe('resolveBetterAuthUser', () => {
 
     it('should prefer email as username over name when building username', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: 'ba-1', email: 'e@x.com', name: 'Display Name' },
+        user: { id: 'ba-1', email: 'e@x.com', name: 'Display Name', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(undefined);
       mockFindByEmail.mockResolvedValue(undefined);
@@ -200,7 +200,7 @@ describe('resolveBetterAuthUser', () => {
       expect(mockFindByUsername).toHaveBeenCalledWith('e@x.com');
     });
 
-    it('should fallback to name when email is not available', async () => {
+    it('should never adopt an existing account by display name when email is not available', async () => {
       mockSessionGet.mockResolvedValue({
         user: { id: 'ba-2', email: undefined, name: 'DisplayName' },
       });
@@ -210,9 +210,12 @@ describe('resolveBetterAuthUser', () => {
         isAdmin: false,
       });
 
-      await resolveBetterAuthUser(makeReq());
+      const result = await resolveBetterAuthUser(makeReq());
 
       expect(mockFindByUsername).toHaveBeenCalledWith('DisplayName');
+      expect(result).toBeNull();
+      expect(mockUpdate).not.toHaveBeenCalled();
+      expect(mockCreateWithHashedPassword).not.toHaveBeenCalled();
     });
   });
 
@@ -309,6 +312,109 @@ describe('resolveBetterAuthUser', () => {
     });
   });
 
+  // ── Account takeover guards (unverified email / foreign binding) ──
+
+  describe('account linking guards', () => {
+    const localAdmin = {
+      username: 'ops-admin',
+      email: 'ops@corp.com',
+      ssoUserId: undefined,
+      isAdmin: true,
+    };
+
+    afterEach(() => {
+      delete process.env.MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK;
+    });
+
+    it('should not adopt a local admin by an unverified email claim', async () => {
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-attacker', email: 'ops@corp.com', emailVerified: false },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue(localAdmin);
+      mockFindByUsername.mockResolvedValue(undefined);
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result).toBeNull();
+      expect(mockUpdate).not.toHaveBeenCalled();
+      expect(mockCreateWithHashedPassword).not.toHaveBeenCalled();
+    });
+
+    it('should not adopt an email-shaped username by an unverified email claim', async () => {
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-attacker', email: 'alice@corp.com' },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue(undefined);
+      mockFindByUsername.mockResolvedValue({ username: 'alice@corp.com', isAdmin: false });
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result).toBeNull();
+      expect(mockUpdate).not.toHaveBeenCalled();
+      expect(mockCreateWithHashedPassword).not.toHaveBeenCalled();
+    });
+
+    it('should not hand over the existing row when auto-create races on a taken username', async () => {
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-attacker', email: 'alice@corp.com' },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue(undefined);
+      // Not present at lookup time, present after the create fails (race).
+      mockFindByUsername
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ username: 'alice@corp.com', ssoUserId: 'ba-alice' });
+      mockCreateWithHashedPassword.mockResolvedValue(null);
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result).toBeNull();
+    });
+
+    it('should refuse a verified email match already bound to a different SSO identity', async () => {
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-other', email: 'ops@corp.com', emailVerified: true },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue({ ...localAdmin, ssoUserId: 'ba-original' });
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result).toBeNull();
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it('should link by verified email and backfill ssoUserId', async () => {
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-ops', email: 'ops@corp.com', emailVerified: true },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue(localAdmin);
+      mockUpdate.mockResolvedValue({});
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result!.username).toBe('ops-admin');
+      expect(mockUpdate).toHaveBeenCalledWith('ops-admin', { ssoUserId: 'ba-ops' });
+    });
+
+    it('should allow legacy unverified linking only with the explicit opt-out flag', async () => {
+      process.env.MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK = 'true';
+      mockSessionGet.mockResolvedValue({
+        user: { id: 'ba-ops', email: 'ops@corp.com' },
+      });
+      mockFindBySsoUserId.mockResolvedValue(undefined);
+      mockFindByEmail.mockResolvedValue(localAdmin);
+      mockUpdate.mockResolvedValue({});
+
+      const result = await resolveBetterAuthUser(makeReq());
+
+      expect(result!.username).toBe('ops-admin');
+    });
+  });
+
   // ── Forward-auth identities stay separate ────────────────────
 
   describe('forward-auth users', () => {
@@ -321,7 +427,7 @@ describe('resolveBetterAuthUser', () => {
 
     it('should not adopt a forward-auth user matched by email', async () => {
       mockSessionGet.mockResolvedValue({
-        user: { id: 'ba-999', email: 'shared@example.com', name: 'Shared' },
+        user: { id: 'ba-999', email: 'shared@example.com', name: 'Shared', emailVerified: true },
       });
       mockFindBySsoUserId.mockResolvedValue(null);
       mockFindByEmail.mockResolvedValue(forwardUser);

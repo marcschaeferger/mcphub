@@ -43,6 +43,65 @@ const rejectForwardAuthUser = (user: IUser | undefined): IUser | null | undefine
   return user;
 };
 
+// An SSO identity may only adopt a pre-existing MCPHub account by email/username
+// when the IdP vouches for the email. Otherwise anyone who can present an
+// arbitrary email claim (open IdP self-registration, mutable email claims) could
+// take over local accounts, including admins. MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK
+// =true restores the previous, unsafe behaviour for IdPs that omit email_verified.
+const canLinkExistingAccount = async (
+  sessionUser: { email?: string | null; emailVerified?: boolean } | undefined,
+): Promise<boolean> => {
+  if (process.env.MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK === 'true') {
+    return true;
+  }
+  if (!sessionUser?.email) {
+    // Display names and opaque ids are never proof of account ownership.
+    return false;
+  }
+  if (sessionUser.emailVerified === true) {
+    return true;
+  }
+  const runtimeConfig = await getBetterAuthRuntimeConfig();
+  const oidc = (
+    runtimeConfig as { providers?: { oidc?: { enabled?: boolean; trustEmail?: boolean } } }
+  ).providers?.oidc;
+  return Boolean(oidc?.enabled && oidc?.trustEmail);
+};
+
+// A local account already bound to a different SSO identity is never handed to
+// another one, whatever its email or username.
+const rejectForeignSsoBinding = (
+  user: IUser | undefined,
+  ssoUserId: string | undefined,
+): IUser | null | undefined => {
+  if (user && user.ssoUserId && user.ssoUserId !== ssoUserId) {
+    logger.warn(
+      `Better Auth login refused: user "${user.username}" is bound to a different SSO identity`,
+    );
+    return null;
+  }
+  return user;
+};
+
+const rejectUnlinkable = (
+  user: IUser | undefined,
+  ssoUserId: string | undefined,
+  linkAllowed: boolean,
+): IUser | null | undefined => {
+  const forwardChecked = rejectForwardAuthUser(user);
+  if (forwardChecked === null) {
+    return null;
+  }
+  if (forwardChecked && !linkAllowed) {
+    // Refuse rather than auto-create a second account for the same identity.
+    logger.warn(
+      `Better Auth login refused: existing user "${forwardChecked.username}" can only be linked to an SSO identity with a verified email`,
+    );
+    return null;
+  }
+  return rejectForeignSsoBinding(forwardChecked, ssoUserId);
+};
+
 export const resolveBetterAuthUser = async (req: Request): Promise<IUser | null> => {
   const session = await getBetterAuthSession(req);
   if (!session) {
@@ -70,9 +129,11 @@ export const resolveBetterAuthUser = async (req: Request): Promise<IUser | null>
     }
   }
 
+  const linkAllowed = await canLinkExistingAccount(session.user);
+
   // Priority 2: Email match (fallback for users created before ssoUserId support)
   if (email) {
-    const emailMatch = rejectForwardAuthUser(await findUserByEmail(email));
+    const emailMatch = rejectUnlinkable(await findUserByEmail(email), ssoUserId, linkAllowed);
     if (emailMatch === null) {
       return null;
     }
@@ -93,7 +154,11 @@ export const resolveBetterAuthUser = async (req: Request): Promise<IUser | null>
   // Priority 3: Username match (backward compatibility)
   const username = email || session.user?.name || session.user?.id;
   if (username) {
-    const usernameMatch = rejectForwardAuthUser(await findUserByUsername(username));
+    const usernameMatch = rejectUnlinkable(
+      await findUserByUsername(username),
+      ssoUserId,
+      linkAllowed,
+    );
     if (usernameMatch === null) {
       return null;
     }
@@ -141,7 +206,19 @@ export const resolveBetterAuthUser = async (req: Request): Promise<IUser | null>
     return createdUser;
   }
 
-  // Handle race condition: another request created the user between our check and create
+  // Handle race condition: another request created the user between our check and
+  // create. Only accept the row if it was created for this same SSO identity;
+  // otherwise the username belongs to a pre-existing account that we must not adopt
+  // (e.g. linking was refused above because the email is unverified).
   const refreshedUser = rejectForwardAuthUser(await findUserByUsername(username));
-  return refreshedUser || null;
+  if (!refreshedUser) {
+    return null;
+  }
+  if (!ssoUserId || refreshedUser.ssoUserId !== ssoUserId) {
+    logger.warn(
+      `Better Auth login refused: username "${username}" already belongs to an account not linked to this SSO identity`,
+    );
+    return null;
+  }
+  return refreshedUser;
 };

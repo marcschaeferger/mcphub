@@ -81,6 +81,7 @@ Provider client credentials remain environment-variable only.
 | `BETTER_AUTH_OIDC_PKCE` | Enable or disable PKCE for the local OIDC provider. Defaults to `true`. |
 | `BETTER_AUTH_OIDC_PROMPT` | Optional `prompt` parameter for the local OIDC provider (`login`, `consent`, `select_account`, etc.). |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Client credentials for a local OIDC provider such as Keycloak, Authentik, or Dex. |
+| `MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK` | An SSO login adopts an existing MCPHub account by email or username only when the IdP marks the email as verified (or the OIDC provider has `trustEmail`). Logins that would match an existing account otherwise are refused. Set to `true` to restore the old unverified linking for IdPs that omit `email_verified`. Defaults to `false`. |
 
 You can still store the non-secret Better Auth settings in `systemConfig.auth.betterAuth`, but `BETTER_AUTH_*` variables now override those values at startup. A full env-only local OIDC example looks like this:
 

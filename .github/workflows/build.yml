@@ -72,5 +72,9 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
           platforms: linux/amd64,linux/arm64
+          # The full variant starts dockerd (Docker-in-Docker) and therefore
+          # keeps running as root; the base variant runs as uid 10001.
           build-args: |
             INSTALL_EXT=${{ matrix.variant == 'full' && 'true' || 'false' }}
+            RUN_AS=${{ matrix.variant == 'full' && '0' || '10001:10001' }}
+            VERSION=${{ steps.meta.outputs.version }}

@@ -25,8 +25,9 @@ import {
 } from '../dao/index.js';
 import { UserContextService } from './userContextService.js';
 import { RequestContextService } from './requestContextService.js';
-import { IUser, BearerKey, BearerKeyKind } from '../types/index.js';
-import { resolveOAuthUserFromToken } from '../utils/oauthBearer.js';
+import { IUser, BearerKey, BearerKeyKind, SystemConfig } from '../types/index.js';
+import { OAuthTokenGrant, resolveOAuthGrantFromToken } from '../utils/oauthBearer.js';
+import { isResourceRouteCovered, warnLegacyUnboundToken } from './oauthResourceBinding.js';
 import { bearerKeyMatches } from '../utils/bearerKeyToken.js';
 import {
   getBearerAuthHeaderValue,
@@ -191,8 +192,10 @@ type BearerAuthResult =
     }
   | {
       valid: false;
-      reason: 'missing' | 'invalid' | 'forbidden' | 'unavailable';
+      reason: BearerAuthFailure;
     };
+
+type BearerAuthFailure = 'missing' | 'invalid' | 'forbidden' | 'unavailable' | 'audience';
 
 /**
  * Check if a string is a valid UUID v4 format
@@ -458,10 +461,35 @@ const resolveUserLevelKeyUser = async (req: Request, key: BearerKey): Promise<Be
 };
 
 // User routes only accept the matching user, whichever credential selected it.
-const oauthUserResult = (req: Request, user: IUser): BearerAuthResult => {
+// The token must also be bound to this route (RFC 8707 audience). Callers have
+// already restored a legacy session's group into req.params.group, so the check
+// covers the group actually served, not just the URL.
+const oauthGrantResult = async (
+  req: Request,
+  grant: OAuthTokenGrant,
+  systemConfig?: SystemConfig | null,
+): Promise<BearerAuthResult> => {
+  const { user, token } = grant;
   const requestedUsername = req.params.user;
   if (requestedUsername && requestedUsername !== user.username) {
     return { valid: false, reason: 'forbidden' };
+  }
+  if (token.resource === undefined) {
+    // Issued before audience binding: honoured until it expires (refresh binds
+    // the successor to the approval's resource when there is one).
+    warnLegacyUnboundToken(token.accessToken, token.clientId);
+  } else if (
+    !(await isResourceRouteCovered(
+      token.resource,
+      (req.params as { group?: string }).group,
+      user.username,
+      systemConfig,
+    ))
+  ) {
+    logger.warn(
+      `OAuth token for client ${token.clientId} rejected: route is outside its resource binding`,
+    );
+    return { valid: false, reason: 'audience' };
   }
   return { valid: true, user, keyName: OAUTH_AUTH_METHOD_LABEL };
 };
@@ -567,10 +595,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
       return matchingKey.kind === 'user' ? { valid: false, reason: 'invalid' } : { valid: true };
     }
 
-    const oauthUser = await resolveOAuthUserFromToken(token);
-    if (oauthUser) {
+    const oauthGrant = await resolveOAuthGrantFromToken(token);
+    if (oauthGrant) {
       logger.log('Recognized OAuth bearer token (auth disabled)');
-      return oauthUserResult(req, oauthUser);
+      return oauthGrantResult(req, oauthGrant, systemConfig);
     }
 
     return { valid: true };
@@ -586,10 +614,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
   }
 
   if (enabledKeys.length === 0) {
-    const oauthUser = await resolveOAuthUserFromToken(token);
-    if (oauthUser) {
+    const oauthGrant = await resolveOAuthGrantFromToken(token);
+    if (oauthGrant) {
       logger.log('Authenticated request using OAuth bearer token without configured keys');
-      return oauthUserResult(req, oauthUser);
+      return oauthGrantResult(req, oauthGrant, systemConfig);
     }
 
     logger.warn(
@@ -618,10 +646,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
     return attachExcludedServerNames(matchingKey, userKeyResult);
   }
 
-  const oauthUser = await resolveOAuthUserFromToken(token);
-  if (oauthUser) {
+  const oauthGrant = await resolveOAuthGrantFromToken(token);
+  if (oauthGrant) {
     logger.log('Authenticated request using OAuth bearer token (no matching static key)');
-    return oauthUserResult(req, oauthUser);
+    return oauthGrantResult(req, oauthGrant, systemConfig);
   }
 
   logger.warn('Bearer authentication failed: token did not match any key or OAuth user');
@@ -683,7 +711,7 @@ const escapeHeaderValue = (value: string): string => {
 const sendBearerAuthError = async (
   req: Request,
   res: Response,
-  reason: 'missing' | 'invalid' | 'forbidden' | 'unavailable',
+  reason: BearerAuthFailure,
 ): Promise<void> => {
   if (reason === 'forbidden') {
     res.status(403).json({
@@ -703,7 +731,11 @@ const sendBearerAuthError = async (
   }
 
   const errorDescription =
-    reason === 'missing' ? 'No authorization provided' : 'Invalid bearer token';
+    reason === 'missing'
+      ? 'No authorization provided'
+      : reason === 'audience'
+        ? 'The access token is not valid for this resource'
+        : 'Invalid bearer token';
 
   const systemConfig = await getSystemConfigDao().get();
   const resourceMetadataUrl = getResourceMetadataUrl(getPublicResourceUrl(req, systemConfig));
@@ -716,11 +748,13 @@ const sendBearerAuthError = async (
     headerParts.push(`resource_metadata="${escapeHeaderValue(resourceMetadataUrl)}"`);
   }
 
-  logger.warn(
-    reason === 'missing'
-      ? 'Bearer authentication required but no authorization header was provided'
-      : 'Bearer authentication failed due to invalid bearer token',
-  );
+  if (reason !== 'audience') {
+    logger.warn(
+      reason === 'missing'
+        ? 'Bearer authentication required but no authorization header was provided'
+        : 'Bearer authentication failed due to invalid bearer token',
+    );
+  }
 
   res.setHeader('WWW-Authenticate', `Bearer ${headerParts.join(', ')}`);
 
@@ -737,7 +771,9 @@ const sendBearerAuthError = async (
     responseBody.resource_metadata = resourceMetadataUrl;
   }
 
-  res.status(401).json(responseBody);
+  // An audience mismatch is a valid token used on the wrong resource: 403, so
+  // the client neither retries the same token nor treats it as expired.
+  res.status(reason === 'audience' ? 403 : 401).json(responseBody);
 };
 
 export const handleSseConnection = async (req: Request, res: Response): Promise<void> => {

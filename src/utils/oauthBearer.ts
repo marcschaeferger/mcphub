@@ -1,14 +1,24 @@
 import { resolveUserSession } from './userSession.js';
 import { isOAuthServerEnabled } from '../services/oauthServerService.js';
 import { getToken as getOAuthStoredToken } from '../models/OAuth.js';
-import { IUser, SystemConfig } from '../types/index.js';
+import { IOAuthToken, IUser, SystemConfig } from '../types/index.js';
 import { safeCompare } from './safeCompare.js';
 import { getBearerTokenFromHeaders, parseBearerAuthorization } from './bearerAuth.js';
 
+export interface OAuthTokenGrant {
+  user: IUser;
+  /** The stored token: its `resource` (audience) and `scope` limit what it may do. */
+  token: IOAuthToken;
+}
+
 /**
- * Resolve an MCPHub user from a raw OAuth bearer token.
+ * Resolve the user and the stored grant behind a raw OAuth access token.
+ * MCP transports must use this (not the user alone) so they can enforce the
+ * token's audience and scope.
  */
-export const resolveOAuthUserFromToken = async (token?: string): Promise<IUser | null> => {
+export const resolveOAuthGrantFromToken = async (
+  token?: string,
+): Promise<OAuthTokenGrant | null> => {
   if (!token || !isOAuthServerEnabled()) {
     return null;
   }
@@ -22,12 +32,21 @@ export const resolveOAuthUserFromToken = async (token?: string): Promise<IUser |
   if (!dbUser) return null;
 
   return {
-    username: oauthToken.username,
-    password: '',
-    userGroups: dbUser.userGroups,
-    isAdmin: dbUser?.isAdmin || false,
+    user: {
+      username: oauthToken.username,
+      password: '',
+      userGroups: dbUser.userGroups,
+      isAdmin: dbUser?.isAdmin || false,
+    },
+    token: oauthToken,
   };
 };
+
+/**
+ * Resolve an MCPHub user from a raw OAuth bearer token.
+ */
+export const resolveOAuthUserFromToken = async (token?: string): Promise<IUser | null> =>
+  (await resolveOAuthGrantFromToken(token))?.user ?? null;
 
 /**
  * Resolve an MCPHub user from the configured bearer auth header.

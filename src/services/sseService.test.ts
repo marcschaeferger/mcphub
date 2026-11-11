@@ -93,6 +93,7 @@ jest.mock('../dao/index.js', () => ({
 // Mock oauthBearer
 jest.mock('../utils/oauthBearer.js', () => ({
   resolveOAuthUserFromToken: jest.fn<() => Promise<unknown>>().mockResolvedValue(undefined),
+  resolveOAuthGrantFromToken: jest.fn<() => Promise<unknown>>().mockResolvedValue(null),
 }));
 
 jest.mock('./userContextService.js', () => ({

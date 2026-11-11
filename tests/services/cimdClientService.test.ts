@@ -248,6 +248,32 @@ describe('cimdClientService', () => {
       expect(getCimdCacheSizeForTesting()).toBeLessThanOrEqual(MAX_CIMD_CACHE_ENTRIES);
     });
 
+    it('evicts least recently used clients, keeping one that is in active use', async () => {
+      configureCimd(true);
+      const fetchMock = jest.fn((input: string | URL | Request) => {
+        const requested = typeof input === 'string' ? input : input.toString();
+        return Promise.resolve(
+          jsonResponse({ client_id: requested, redirect_uris: ['https://app.example.com/cb'] }),
+        );
+      });
+      setCimdFetchImplForTesting(fetchMock as unknown as typeof fetch);
+
+      const hot = 'https://client.example.com/hot';
+      await resolveCimdClient(hot);
+      // Fill the cache behind the legitimate client, which is then used again...
+      for (let i = 0; i < MAX_CIMD_CACHE_ENTRIES - 1; i += 1) {
+        await resolveCimdClient(`https://client.example.com/c/${i}`);
+      }
+      await resolveCimdClient(hot);
+      // ...before an attacker floods further unique ids.
+      for (let i = 0; i < 25; i += 1) {
+        await resolveCimdClient(`https://client.example.com/flood/${i}`);
+      }
+      const fetchesBefore = fetchMock.mock.calls.length;
+      await resolveCimdClient(hot);
+      expect(fetchMock.mock.calls.length).toBe(fetchesBefore);
+    });
+
     it('returns undefined on network failures without throwing', async () => {
       configureCimd(true);
       setCimdFetchImplForTesting(

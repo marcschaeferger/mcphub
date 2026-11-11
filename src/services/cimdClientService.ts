@@ -288,6 +288,10 @@ export const resolveCimdClient = async (
   const now = Date.now();
   const cached = cache.get(clientId);
   if (cached && cached.expiresAt > now) {
+    // Re-insert so eviction in storeInCache drops least recently used clients
+    // first, not legitimate clients that are in active use.
+    cache.delete(clientId);
+    cache.set(clientId, cached);
     return cached.client;
   }
   if (cached) {

@@ -87,9 +87,11 @@ pnpm install
 cp .env.example .env
 
 # 5. Optional: use PostgreSQL instead of the default file storage.
-#    Start only the database service, then add to .env:
-#    DB_URL=postgresql://mcphub:mcphub_password@localhost:5432/mcphub
+#    Pick a password, start only the database service (published on
+#    127.0.0.1 only), then add to .env:
+#    DB_URL=postgresql://mcphub:<your DB_PASSWORD>@localhost:5432/mcphub
 #    The schema is created when MCPHub starts.
+export DB_PASSWORD=$(openssl rand -hex 24)
 docker compose -f docker-compose.db.yml up -d postgres
 
 # 6. Start development server

@@ -86,7 +86,7 @@ Smart Routing requires additional setup compared to basic MCPHub usage:
         volumes:
           - postgres_data:/var/lib/postgresql/data
         ports:
-          - "5432:5432"
+          - "127.0.0.1:5432:5432"
 
     volumes:
       postgres_data:
@@ -108,7 +108,7 @@ Smart Routing requires additional setup compared to basic MCPHub usage:
       -e POSTGRES_DB=mcphub \
       -e POSTGRES_USER=mcphub \
       -e POSTGRES_PASSWORD=your_password \
-      -p 5432:5432 \
+      -p 127.0.0.1:5432:5432 \
       pgvector/pgvector:pg17
     ```
 

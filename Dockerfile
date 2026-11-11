@@ -34,10 +34,16 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm install --frozen-lockfile --store-dir /pnpm/store
 COPY . .
 # The bundled servers.json is the default. Refreshing it from mcpm.sh pulls an
-# unverified remote file into the image, so it is opt-in.
+# unverified remote file into the image, so it is opt-in. The upstream catalogue
+# carries real-looking example tokens, which are replaced with inert placeholders.
 ARG FETCH_LATEST_SERVERS=false
 RUN if [ "$FETCH_LATEST_SERVERS" = "true" ]; then \
-  node -e "fetch('https://mcpm.sh/api/servers.json',{signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);const t=await r.text();JSON.parse(t);require('fs').writeFileSync('servers.json',t)}).catch(e=>console.error('Failed to download servers.json, using bundled version:',e.message))"; \
+  node -e "fetch('https://mcpm.sh/api/servers.json',{signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);const t=await r.text();JSON.parse(t);require('fs').writeFileSync('servers.json',t)}).catch(e=>console.error('Failed to download servers.json, using bundled version:',e.message))" \
+  && sed -E -i \
+    -e 's/"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}"/"your_github_token_here"/g' \
+    -e 's/"sk_(test|live)_[A-Za-z0-9]{16,}"/"replace_with_your_secret_key"/g' \
+    -e 's/"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"/"<jwt-token>"/g' \
+    servers.json; \
   fi \
   && pnpm build
 
@@ -76,6 +82,11 @@ RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \
   && apt-get install -y --no-install-recommends ca-certificates curl git procps tini \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# The pip in the python base image vendors urllib3/msgpack/setuptools versions
+# with known HIGH advisories. uv/uvx do not use it, but users may; upgrade it.
+ARG PIP_VERSION=26.3
+RUN python -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

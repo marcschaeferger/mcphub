@@ -312,7 +312,25 @@ const createAncestorTracker = () => {
   };
 };
 
-const createSafeJsonReplacer = () => {
+/**
+ * Shared, mutable budget for createSafeJSON. Shared (acyclic) references are
+ * serialized once per path, so a tiny input whose objects reference each other
+ * in a chain of diamonds (e.g. a dereferenced OpenAPI schema with
+ * `S(n) = {a: S(n-1), b: S(n-1)}`) expands exponentially. The budget counts
+ * every serialized value and aborts the traversal once it is spent.
+ */
+export interface SafeJsonBudget {
+  remaining: number;
+}
+
+export class SafeJsonBudgetExceededError extends Error {
+  constructor() {
+    super('Serialized object exceeds the size budget (too many nested or shared references)');
+    this.name = 'SafeJsonBudgetExceededError';
+  }
+}
+
+const createSafeJsonReplacer = (budget?: SafeJsonBudget) => {
   const tracker = createAncestorTracker();
   // serializeError() returns a fresh object on each call, so a cyclic
   // Error.cause chain would keep producing new objects forever; this guard
@@ -320,6 +338,10 @@ const createSafeJsonReplacer = () => {
   const seenErrors = new WeakSet<Error>();
 
   return function (this: unknown, _key: string, value: unknown): unknown {
+    if (budget && --budget.remaining < 0) {
+      throw new SafeJsonBudgetExceededError();
+    }
+
     if (typeof value === 'object' && value !== null) {
       if (tracker.isCircular(this, value)) {
         return CIRCULAR_REFERENCE;
@@ -380,8 +402,8 @@ const createSafeLogReplacer = () => {
  * @param obj - The object to make JSON-safe
  * @returns A new object that can be safely serialized to JSON
  */
-export const createSafeJSON = <T>(obj: T): T => {
-  return JSON.parse(JSON.stringify(obj, createSafeJsonReplacer()));
+export const createSafeJSON = <T>(obj: T, budget?: SafeJsonBudget): T => {
+  return JSON.parse(JSON.stringify(obj, createSafeJsonReplacer(budget)));
 };
 
 /**

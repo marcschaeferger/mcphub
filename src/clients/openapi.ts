@@ -16,7 +16,11 @@ import {
   ssrfConnectionOptions,
 } from '../utils/ssrf.js';
 import { getUserDao } from '../dao/index.js';
-import { sanitizeStringForLogging, createSafeJSON } from '../utils/serialization.js';
+import {
+  sanitizeStringForLogging,
+  createSafeJSON,
+  type SafeJsonBudget,
+} from '../utils/serialization.js';
 import { readResponseTextWithLimit } from '../utils/boundedResponse.js';
 import {
   buildMultipartParts,
@@ -34,6 +38,17 @@ const DEFAULT_OPENAPI_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
 const resolveOpenApiMaxResponseBytes = (): number => {
   const parsed = Number.parseInt(process.env.OPENAPI_MAX_RESPONSE_BYTES ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OPENAPI_MAX_RESPONSE_BYTES;
+};
+
+const DEFAULT_OPENAPI_MAX_SCHEMA_NODES = 2_000_000;
+
+// Upper bound on the number of JSON values generated for all tool input schemas
+// of one spec. Dereferenced $refs are shared objects, so a ~3 KB spec of chained
+// components can otherwise expand to gigabytes and block/OOM the hub. Override
+// with OPENAPI_MAX_SCHEMA_NODES.
+const resolveOpenApiMaxSchemaNodes = (): number => {
+  const parsed = Number.parseInt(process.env.OPENAPI_MAX_SCHEMA_NODES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OPENAPI_MAX_SCHEMA_NODES;
 };
 
 export interface OpenAPIToolInfo {
@@ -679,6 +694,7 @@ export class OpenAPIClient {
   }
 
   private extractTools(): void {
+    const schemaBudget: SafeJsonBudget = { remaining: resolveOpenApiMaxSchemaNodes() };
     if (!this.spec?.paths) {
       return;
     }
@@ -757,6 +773,7 @@ export class OpenAPIClient {
           // embeddings) throws "Converting circular structure to JSON". See #959.
           inputSchema: createSafeJSON(
             this.generateInputSchema(operation, path, method as string, requestBodySelection),
+            schemaBudget,
           ),
           operationId: operation.operationId || operationName,
           method: method as string,

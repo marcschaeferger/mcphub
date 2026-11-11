@@ -19,6 +19,7 @@ import { findOAuthClientById } from '../models/OAuth.js';
 import { assertSafeUrl, createRedirectValidatingFetch, type SsrfLookup } from '../utils/ssrf.js';
 import type { IOAuthClient } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { readResponseTextWithLimit } from '../utils/boundedResponse.js';
 import {
   MAX_CLIENT_NAME_LENGTH,
   MAX_CONTACTS,
@@ -195,30 +196,6 @@ export const mapCimdDocument = (
   };
 };
 
-const readBodyWithLimit = async (
-  response: Response,
-  maxBytes: number,
-): Promise<string | undefined> => {
-  if (!response.body) {
-    const text = await response.text();
-    return Buffer.byteLength(text, 'utf8') > maxBytes ? undefined : text;
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      return undefined;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-};
-
 const storeInCache = (clientId: string, entry: CacheEntry): void => {
   cache.delete(clientId);
   if (cache.size >= MAX_CIMD_CACHE_ENTRIES) {
@@ -276,7 +253,7 @@ const fetchCimdDocument = async (clientIdUrl: string): Promise<IOAuthClient | un
   try {
     // Content-Length is optional (chunked responses), so enforce the limit while
     // reading instead of buffering the whole body first.
-    const text = await readBodyWithLimit(response, MAX_DOCUMENT_BYTES);
+    const text = await readResponseTextWithLimit(response, MAX_DOCUMENT_BYTES);
     if (text === undefined) {
       logger.warn('CIMD metadata document exceeds size limit', { clientIdUrl });
       return undefined;

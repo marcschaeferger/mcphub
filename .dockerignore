@@ -1,24 +1,65 @@
+# VCS, CI and editor metadata
 .git
 .github
+.gitattributes
+.agents
+.claude
+.idea
+.vscode
+.DS_Store
 
+# Dependencies and build output are produced inside the image
 node_modules
 frontend/node_modules
-
 dist
 frontend/dist
 coverage
+.coveragerc
 
-.DS_Store
-.env
-.env.*
+# Not needed to build or run the image
+docs
+articals
+assets
+examples
+*.md
+Dockerfile
+docker-compose*.yml
+jest.config.cjs
+tsconfig.test.json
+eslint.config.mjs
+.eslintrc.json
+.prettierrc
+nginx.conf.example
+
+# Tests (tests/docker is kept for the replica test image)
+tests/*
+!tests/docker
+**/*.test.ts
+**/*.test.tsx
+**/__tests__
+
+# Local runtime data
+data
+
+# Secrets and local environment
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/.npmrc
+**/.pypirc
+
+# Logs
 *.log
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-.idea
-.vscode
 
 # Local personal credential storage and encryption keys
 *.credentials.json

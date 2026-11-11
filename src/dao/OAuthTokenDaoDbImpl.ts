@@ -52,6 +52,7 @@ export class OAuthTokenDaoDbImpl implements OAuthTokenDao {
       username: entity.username,
       sessionVersion: entity.sessionVersion,
       approvalId: entity.approvalId,
+      resource: entity.resource,
     });
     return this.mapToOAuthToken(token);
   }
@@ -112,6 +113,7 @@ export class OAuthTokenDaoDbImpl implements OAuthTokenDao {
     username: string;
     sessionVersion?: string;
     approvalId?: string;
+    resource?: string | null;
   }): IOAuthToken {
     return {
       accessToken: token.accessToken,
@@ -123,6 +125,8 @@ export class OAuthTokenDaoDbImpl implements OAuthTokenDao {
       username: token.username,
       sessionVersion: token.sessionVersion,
       approvalId: token.approvalId,
+      // NULL marks a legacy (unbound) token; keep it distinct from '' (bound to all).
+      resource: token.resource ?? undefined,
     };
   }
 }

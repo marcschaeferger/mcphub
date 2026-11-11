@@ -1,8 +1,11 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
+  getApprovalResource,
   isApprovalGrantValid,
   rememberApproval,
   resolveConsentScopes,
 } from './oauthApprovalService.js';
+import { InvalidTargetError, resolveTokenResource } from './oauthResourceBinding.js';
 import { getUserSessionVersion, resolveUserSession } from '../utils/userSession.js';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import { Request as ExpressRequest, Response as ExpressResponse } from 'express';
@@ -25,6 +28,29 @@ import { logger } from '../utils/logger.js';
 import type { SystemConfig } from '../types/index.js';
 
 const { Request, Response } = OAuth2Server;
+
+// The model API has no access to the token request, so the RFC 8707 `resource`
+// parameter of the current token request is carried here.
+const tokenRequestContext = new AsyncLocalStorage<{ resource?: unknown }>();
+
+/**
+ * Resolve the audience for a token about to be issued from `granted` (the
+ * approved resource) and the token request's `resource` parameter. Runs before
+ * the code or refresh token is consumed, so a bad parameter does not burn it.
+ */
+const resolveIssuedResource = async (
+  granted: string | undefined,
+  username: string,
+): Promise<string | undefined> => {
+  try {
+    return await resolveTokenResource(granted, tokenRequestContext.getStore()?.resource, username);
+  } catch (error) {
+    if (error instanceof InvalidTargetError) {
+      throw new OAuth2Server.OAuthError(error.message, { code: 400, name: 'invalid_target' });
+    }
+    throw error;
+  }
+};
 
 // OAuth2Server model implementation
 const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshTokenModel = {
@@ -130,6 +156,8 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: user.username,
         sessionVersion,
         approvalId,
+        // The audience the user approved travels with the code into the token.
+        resource: await getApprovalResource(approvalId),
         codeChallenge: code.codeChallenge,
         codeChallengeMethod: code.codeChallengeMethod,
       },
@@ -186,6 +214,7 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: code.username,
         sessionVersion: code.sessionVersion,
         approvalId: code.approvalId,
+        resource: await resolveIssuedResource(code.resource, code.username),
       },
       codeChallenge: code.codeChallenge,
       codeChallengeMethod: code.codeChallengeMethod,
@@ -229,6 +258,9 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: user.username,
         sessionVersion: user.sessionVersion,
         approvalId: user.approvalId,
+        // Set by getAuthorizationCode/getRefreshToken; undefined keeps a legacy
+        // grant unbound (see getRefreshToken).
+        resource: user.resource,
       },
       accessTokenLifetime,
       refreshTokenLifetime,
@@ -300,6 +332,13 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
 
     const scopeArray = token.scope ? token.scope.split(' ') : undefined;
 
+    // The refreshed token is bound to what the user approved: the approval's
+    // resource when the grant has one (this also binds legacy tokens issued
+    // before audience binding), else the token's own resource. A legacy token
+    // without an approval stays unbound until its refresh token expires.
+    const approvedResource = await getApprovalResource(token.approvalId);
+    const grantedResource = approvedResource ?? token.resource;
+
     return {
       refreshToken: token.refreshToken!,
       refreshTokenExpiresAt: token.refreshTokenExpiresAt!,
@@ -315,6 +354,7 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: token.username,
         sessionVersion: token.sessionVersion,
         approvalId: token.approvalId,
+        resource: await resolveIssuedResource(grantedResource, token.username),
       },
     };
   },
@@ -493,7 +533,9 @@ export const handleTokenRequest = async (
   const request = new Request(req);
   const response = new Response(res);
 
-  return await oauth.token(request, response);
+  return await tokenRequestContext.run({ resource: req.body?.resource }, () =>
+    oauth!.token(request, response),
+  );
 };
 
 /**

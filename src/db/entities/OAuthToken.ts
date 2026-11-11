@@ -44,6 +44,10 @@ export class OAuthToken {
   @Column({ name: 'approval_id', type: 'uuid', nullable: true })
   approvalId?: string;
 
+  // RFC 8707 audience; NULL for tokens issued before audience binding existed.
+  @Column({ type: 'text', nullable: true })
+  resource?: string | null;
+
   @Column({ name: 'session_version', type: 'varchar', length: 64, nullable: true })
   sessionVersion?: string;
 

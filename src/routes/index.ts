@@ -203,6 +203,7 @@ import {
   authenticatedRouteRateLimiter,
   hostedInternalEventRateLimiter,
   mcpConnectionRateLimiter,
+  oauthClientRegistrationRateLimiter,
   templateRateLimiter,
 } from '../utils/rateLimit.js';
 
@@ -272,7 +273,12 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   ); // Public protected resource metadata
 
   // RFC 7591 Dynamic Client Registration endpoints (public for registration)
-  app.post('/oauth/register', mcpConnectionRateLimiter, registerClient); // Register new OAuth client
+  app.post(
+    '/oauth/register',
+    mcpConnectionRateLimiter,
+    oauthClientRegistrationRateLimiter,
+    registerClient,
+  ); // Register new OAuth client
   app.get('/oauth/register/:clientId', mcpConnectionRateLimiter, getClientConfiguration); // Read client configuration
   app.put('/oauth/register/:clientId', mcpConnectionRateLimiter, updateClientConfiguration); // Update client configuration
   app.delete('/oauth/register/:clientId', mcpConnectionRateLimiter, deleteClientRegistration); // Delete client registration

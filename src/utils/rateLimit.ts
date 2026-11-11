@@ -147,6 +147,13 @@ export const authRegistrationRateLimiter = createStandardRateLimiter({
   max: envLimit('REGISTER_RATE_LIMIT_MAX', 20),
 });
 
+// Anonymous RFC 7591 client registration persists a client on every success, so
+// it gets its own, much smaller budget than the MCP transport limiter.
+export const oauthClientRegistrationRateLimiter = createStandardRateLimiter({
+  windowMs: envInt('OAUTH_REGISTER_RATE_LIMIT_WINDOW_MS', MINUTES_15),
+  max: envLimit('OAUTH_REGISTER_RATE_LIMIT_MAX', 60),
+});
+
 export const spaPageRateLimiter = createStandardRateLimiter({
   windowMs: envInt('SPA_RATE_LIMIT_WINDOW_MS', MINUTE_1),
   max: envLimit('SPA_RATE_LIMIT_MAX', 600),

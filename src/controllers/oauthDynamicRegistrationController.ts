@@ -8,6 +8,7 @@ import {
   deleteOAuthClient,
   verifyRegistrationToken,
   deleteRegistrationToken,
+  getOAuthClients,
 } from '../models/OAuth.js';
 import { IOAuthClient } from '../types/index.js';
 import { getSystemConfigDao } from '../dao/DaoFactory.js';
@@ -15,6 +16,20 @@ import { auth } from '../middlewares/auth.js';
 import { parseBearerAuthorization } from '../utils/bearerAuth.js';
 import { resolveInstallBaseUrl } from '../utils/installBaseUrl.js';
 import { logger } from '../utils/logger.js';
+import {
+  ClientMetadataError,
+  assertValidRedirectUris,
+  resolveMaxDynamicClients,
+  validateClientMetadata,
+} from '../utils/oauthClientMetadata.js';
+
+const sendMetadataError = (res: Response, error: unknown): boolean => {
+  if (error instanceof ClientMetadataError) {
+    res.status(400).json({ error: error.error, error_description: error.message });
+    return true;
+  }
+  return false;
+};
 
 /**
  * POST /oauth/register
@@ -51,9 +66,18 @@ export const registerClient = async (req: Request, res: Response): Promise<void>
       }
     }
 
-    // Validate required fields
+    // Validate required fields and bound every persisted metadata value.
+    let redirect_uris: string[];
+    let metadata: ReturnType<typeof validateClientMetadata>;
+    try {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      redirect_uris = assertValidRedirectUris(body.redirect_uris);
+      metadata = validateClientMetadata(body);
+    } catch (error) {
+      if (sendMetadataError(res, error)) return;
+      throw error;
+    }
     const {
-      redirect_uris,
       client_name,
       grant_types,
       response_types,
@@ -67,36 +91,22 @@ export const registerClient = async (req: Request, res: Response): Promise<void>
       tos_uri,
       jwks_uri,
       jwks,
-    } = req.body;
+    } = metadata;
 
-    // redirect_uris is required
-    if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
-      res.status(400).json({
-        error: 'invalid_redirect_uri',
-        error_description: 'redirect_uris is required and must be a non-empty array',
-      });
-      return;
-    }
-
-    // Validate redirect URIs
-    for (const uri of redirect_uris) {
-      try {
-        const url = new URL(uri);
-        // For security, only allow https (except localhost for development)
-        if (
-          url.protocol !== 'https:' &&
-          !url.hostname.match(/^(localhost|127\.0\.0\.1|\[::1\])$/)
-        ) {
-          res.status(400).json({
-            error: 'invalid_redirect_uri',
-            error_description: `Redirect URI must use HTTPS: ${uri}`,
-          });
-          return;
-        }
-      } catch (e) {
-        res.status(400).json({
-          error: 'invalid_redirect_uri',
-          error_description: `Invalid redirect URI: ${uri}`,
+    // Cap the number of stored dynamic clients so anonymous registration cannot
+    // grow the settings store without bound (idle ones are reaped by clientTtl).
+    const maxDynamicClients = resolveMaxDynamicClients();
+    if (maxDynamicClients > 0) {
+      const dynamicClients = (await getOAuthClients()).filter(
+        (existing) => existing.owner === 'dynamic-registration',
+      );
+      if (dynamicClients.length >= maxDynamicClients) {
+        logger.warn(
+          `Dynamic client registration refused: limit of ${maxDynamicClients} clients reached`,
+        );
+        res.status(503).json({
+          error: 'temporarily_unavailable',
+          error_description: 'Too many registered clients, please try again later',
         });
         return;
       }
@@ -335,53 +345,22 @@ export const updateClientConfiguration = async (req: Request, res: Response): Pr
       return;
     }
 
-    const {
-      redirect_uris,
-      client_name,
-      grant_types,
-      scope,
-      contacts,
-      logo_uri,
-      client_uri,
-      policy_uri,
-      tos_uri,
-    } = req.body;
+    let redirect_uris: string[] | undefined;
+    let metadata: ReturnType<typeof validateClientMetadata>;
+    try {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      redirect_uris =
+        body.redirect_uris !== undefined ? assertValidRedirectUris(body.redirect_uris) : undefined;
+      metadata = validateClientMetadata(body);
+    } catch (error) {
+      if (sendMetadataError(res, error)) return;
+      throw error;
+    }
+    const { client_name, grant_types, scope, contacts, logo_uri, client_uri, policy_uri, tos_uri } =
+      metadata;
 
     const systemConfig = await getSystemConfigDao().get();
     const oauthConfig = systemConfig?.oauthServer;
-
-    // Validate redirect URIs if provided
-    if (redirect_uris) {
-      if (!Array.isArray(redirect_uris) || redirect_uris.length === 0) {
-        res.status(400).json({
-          error: 'invalid_redirect_uri',
-          error_description: 'redirect_uris must be a non-empty array',
-        });
-        return;
-      }
-
-      for (const uri of redirect_uris) {
-        try {
-          const url = new URL(uri);
-          if (
-            url.protocol !== 'https:' &&
-            !url.hostname.match(/^(localhost|127\.0\.0\.1|\[::1\])$/)
-          ) {
-            res.status(400).json({
-              error: 'invalid_redirect_uri',
-              error_description: `Redirect URI must use HTTPS: ${uri}`,
-            });
-            return;
-          }
-        } catch (e) {
-          res.status(400).json({
-            error: 'invalid_redirect_uri',
-            error_description: `Invalid redirect URI: ${uri}`,
-          });
-          return;
-        }
-      }
-    }
 
     // Validate grant types if provided
     if (grant_types) {

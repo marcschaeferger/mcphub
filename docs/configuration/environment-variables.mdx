@@ -27,6 +27,8 @@ MCPHub reads the following environment variables at startup. The authoritative l
 | `ENABLE_METRICS` | `false` | Enable the root `/metrics` Prometheus endpoint. |
 | `METRICS_TOKEN` | unset | Dedicated bearer token for metrics scraping. Without it, an enabled endpoint is public; restrict network access. |
 | `DEBUG` | `false` | Set to `true` to enable verbose startup logging for frontend-path discovery. |
+| `MCPHUB_OAUTH_MAX_DYNAMIC_CLIENTS` | `1000` | Maximum number of stored OAuth clients created by dynamic client registration (`POST /oauth/register`). Further registrations get `503` until idle clients are reaped. `0` disables the cap. |
+| `OAUTH_REGISTER_RATE_LIMIT_MAX` | `60` | Dynamic client registrations allowed per IP per `OAUTH_REGISTER_RATE_LIMIT_WINDOW_MS` (default 15 minutes). |
 
 
 ### Custom Smart Routing URL

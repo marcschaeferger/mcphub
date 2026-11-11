@@ -165,9 +165,14 @@ RUN install -d -o mcphub -g mcphub -m 0750 /app/data
 USER ${MCPHUB_UID}:${MCPHUB_GID}
 RUN uv tool install --no-cache mcp-server-fetch
 
-# Run unprivileged by default (numeric uid so runAsNonRoot can verify it).
-# The "full" variant is built with RUN_AS=0 because it starts dockerd.
-ARG RUN_AS=${MCPHUB_UID}:${MCPHUB_GID}
+# The container starts as root only so the entrypoint can hand root-owned
+# state (volumes from older images, daemon-created bind mounts) to the mcphub
+# user; it then runs MCPHub as uid ${MCPHUB_UID} via setpriv. It stays root
+# only for Docker-in-Docker (full variant), MCPHUB_RUN_AS_ROOT=true or
+# settings the mcphub user cannot write (see entrypoint.sh).
+# Strictly non-root platforms can run it with --user 10001:10001 /
+# runAsUser: 10001, or build it with --build-arg RUN_AS=10001:10001.
+ARG RUN_AS=0:0
 USER ${RUN_AS}
 
 EXPOSE 3000

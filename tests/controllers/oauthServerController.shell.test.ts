@@ -115,8 +115,11 @@ describe('oauthServerController getAuthorize consent shell', () => {
       scope: 'read write',
     });
     expect(context.scopes).toEqual([
-      { name: 'read', description: 'Read access to your MCP servers and tools' },
-      { name: 'write', description: 'Execute tools and modify MCP server configurations' },
+      {
+        name: 'read',
+        description: 'List and read tools, prompts and resources (cannot run tools)',
+      },
+      { name: 'write', description: 'Run tools on the MCP servers you can access' },
     ]);
 
     expect(res.type).toHaveBeenCalledWith('html');

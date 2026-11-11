@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
 import { canAccessGroupRoute } from '../utils/groupAccess.js';
 import {
@@ -34,7 +34,13 @@ import {
   getBearerTokenFromHeaders,
   getForwardAuthTokenFromHeaders,
   parseBearerAuthorization,
+  resolveJsonBodyLimit,
 } from '../utils/bearerAuth.js';
+import {
+  OAUTH_EXECUTE_SCOPES,
+  findReadOnlyDeniedMethod,
+  isReadOnlyOAuthScope,
+} from '../utils/oauthScope.js';
 import {
   HostedAuthUnavailableError,
   isHostedApiKey,
@@ -189,6 +195,8 @@ type BearerAuthResult =
       kind?: BearerKeyKind;
       excludedServerNames?: string[];
       hostedAuth?: HostedAuthContext;
+      /** OAuth token granted only the `read` scope (no tools/call). */
+      oauthReadOnly?: boolean;
     }
   | {
       valid: false;
@@ -491,7 +499,12 @@ const oauthGrantResult = async (
     );
     return { valid: false, reason: 'audience' };
   }
-  return { valid: true, user, keyName: OAUTH_AUTH_METHOD_LABEL };
+  return {
+    valid: true,
+    user,
+    keyName: OAUTH_AUTH_METHOD_LABEL,
+    oauthReadOnly: isReadOnlyOAuthScope(token.scope),
+  };
 };
 
 const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
@@ -776,6 +789,69 @@ const sendBearerAuthError = async (
   res.status(reason === 'audience' ? 403 : 401).json(responseBody);
 };
 
+/**
+ * Enforce the OAuth `read` scope on a JSON-RPC body (message or batch, checked
+ * per message). A denied request gets HTTP 403 with
+ * `WWW-Authenticate: Bearer error="insufficient_scope"` and the scope that is
+ * needed, which MCP clients use for step-up authorization; a JSON-RPC error
+ * would be indistinguishable from a tool failure and give the client no way to
+ * obtain a sufficient token.
+ */
+const enforceOAuthScope = async (
+  req: Request,
+  res: Response,
+  result: BearerAuthResult,
+  body: unknown,
+): Promise<boolean> => {
+  if (!result.valid || !result.oauthReadOnly) return true;
+  const denied = findReadOnlyDeniedMethod(body);
+  if (!denied) return true;
+
+  const systemConfig = await getSystemConfigDao().get();
+  const allowedScopes = systemConfig?.oauthServer?.allowedScopes ?? ['read', 'write'];
+  const requiredScope =
+    OAUTH_EXECUTE_SCOPES.find((scope) => allowedScopes.includes(scope)) ?? 'write';
+  const description = `The access token only grants read access; ${denied} requires the ${requiredScope} scope`;
+  const headerParts = [
+    'error="insufficient_scope"',
+    `scope="${escapeHeaderValue(requiredScope)}"`,
+    `error_description="${escapeHeaderValue(description)}"`,
+  ];
+  const resourceMetadataUrl = getResourceMetadataUrl(getPublicResourceUrl(req, systemConfig));
+  if (resourceMetadataUrl) {
+    headerParts.push(`resource_metadata="${escapeHeaderValue(resourceMetadataUrl)}"`);
+  }
+  logger.warn(`OAuth token rejected: ${denied} needs the ${requiredScope} scope`);
+  res.setHeader('WWW-Authenticate', `Bearer ${headerParts.join(', ')}`);
+  res.status(403).json({ error: 'insufficient_scope', error_description: description });
+  return false;
+};
+
+// Legacy SSE message bodies are not parsed by the global JSON middleware (the
+// transport reads the stream). Parse them here when the scope must be checked.
+const readSseMessageBody = async (
+  req: Request,
+  res: Response,
+): Promise<{ ok: true; body: unknown } | { ok: false }> => {
+  if (!req.is('application/json')) return { ok: true, body: undefined };
+  const systemConfig = await getSystemConfigDao().get();
+  try {
+    await new Promise<void>((resolve, reject) =>
+      express.json({ limit: resolveJsonBodyLimit(systemConfig) })(req, res, (error?: unknown) =>
+        error ? reject(error) : resolve(),
+      ),
+    );
+  } catch {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error' },
+      id: null,
+    });
+    return { ok: false };
+  }
+  return { ok: true, body: req.body };
+};
+
 export const handleSseConnection = async (req: Request, res: Response): Promise<void> => {
   // User context is now set by sseUserContextMiddleware
   const userContextService = UserContextService.getInstance();
@@ -868,6 +944,14 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   attachUserContextFromBearer(bearerAuthResult, res);
   if (!(await authorizeGroupRoute(req, res))) return;
 
+  let parsedBody: unknown;
+  if (bearerAuthResult.oauthReadOnly) {
+    const parsed = await readSseMessageBody(req, res);
+    if (!parsed.ok) return;
+    parsedBody = parsed.body;
+    if (!(await enforceOAuthScope(req, res, bearerAuthResult, parsedBody))) return;
+  }
+
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
 
@@ -911,7 +995,11 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
       bearerAuthResult.excludedServerNames ?? excludedServerNames,
     );
 
-    await (transport as SSEServerTransport).handlePostMessage(req, res);
+    const sseTransport = transport as SSEServerTransport;
+    // A body parsed for the scope check is consumed; hand it to the transport.
+    await (parsedBody === undefined
+      ? sseTransport.handlePostMessage(req, res)
+      : sseTransport.handlePostMessage(req, res, parsedBody));
   });
 };
 
@@ -1025,6 +1113,7 @@ export const handleMcpPostRequest = async (req: Request, res: Response): Promise
 
   attachUserContextFromBearer(bearerAuthResult, res);
   if (!(await authorizeGroupRoute(req, res, legacyRequest))) return;
+  if (!(await enforceOAuthScope(req, res, bearerAuthResult, req.body))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;

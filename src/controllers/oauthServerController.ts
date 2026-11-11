@@ -823,9 +823,11 @@ export const getProtectedResourceMetadata = async (req: Request, res: Response):
  */
 function getScopeDescription(scope: string): string {
   const descriptions: Record<string, string> = {
-    read: 'Read access to your MCP servers and tools',
-    write: 'Execute tools and modify MCP server configurations',
-    admin: 'Administrative access to all resources',
+    // Keep in sync with the enforcement in utils/oauthScope.ts. Tokens only
+    // work on MCP endpoints; no scope grants dashboard or configuration access.
+    read: 'List and read tools, prompts and resources (cannot run tools)',
+    write: 'Run tools on the MCP servers you can access',
+    admin: 'Run tools on the MCP servers you can access',
   };
-  return descriptions[scope] || 'Access to MCPHub resources';
+  return descriptions[scope] || 'Use the MCP servers you can access';
 }

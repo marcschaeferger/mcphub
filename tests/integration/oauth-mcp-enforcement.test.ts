@@ -253,4 +253,108 @@ describe('OAuth token enforcement on MCP transports', () => {
       warn.mockRestore();
     });
   });
+
+  describe('scope', () => {
+    const call = (method: string, id = 2) => ({ jsonrpc: '2.0', id, method, params: {} });
+    // An established Streamable HTTP session on the aggregate route.
+    const withSession = () => {
+      const { NodeStreamableHTTPServerTransport } = jest.requireMock(
+        '@modelcontextprotocol/node',
+      ) as { NodeStreamableHTTPServerTransport: new () => unknown };
+      transports['session'] = {
+        transport: new NodeStreamableHTTPServerTransport() as never,
+        group: '',
+      };
+    };
+    const postInSession = (token: string, body: unknown) =>
+      post('/mcp', token, body).set('mcp-session-id', 'session');
+    const expectScopeRejection = (response: request.Response) => {
+      expect(response.status).toBe(403);
+      expect(response.headers['www-authenticate']).toMatch(
+        /^Bearer error="insufficient_scope", scope="write"/,
+      );
+      expect(response.body.error).toBe('insufficient_scope');
+    };
+
+    beforeEach(withSession);
+
+    it.each([
+      'initialize',
+      'ping',
+      'tools/list',
+      'prompts/list',
+      'prompts/get',
+      'resources/list',
+      'resources/templates/list',
+      'resources/read',
+      'completion/complete',
+      'notifications/initialized',
+    ])('lets a read token call %s', async (method) => {
+      expect((await postInSession(issue('', 'read'), call(method))).status).toBe(200);
+    });
+
+    it.each(['tools/call', 'logging/setLevel', 'tasks/get', 'resources/subscribe'])(
+      'denies %s to a read token',
+      async (method) => {
+        expectScopeRejection(await postInSession(issue('', 'read'), call(method)));
+      },
+    );
+
+    it('checks every message of a batch', async () => {
+      const token = issue('', 'read');
+      expectScopeRejection(
+        await postInSession(token, [call('tools/list', 1), call('tools/call', 2)]),
+      );
+      expect(
+        (await postInSession(token, [call('tools/list', 1), call('prompts/list', 2)])).status,
+      ).toBe(200);
+    });
+
+    it('denies smart-routing tool execution to a read token', async () => {
+      const token = issue(`${HUB}/mcp/$smart`, 'read');
+      transports['smart'] = { transport: transports['session'].transport, group: '$smart' };
+      const response = await post('/mcp/$smart', token, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'call_tool', arguments: { toolName: 'x' } },
+      }).set('mcp-session-id', 'smart');
+      expectScopeRejection(response);
+    });
+
+    it.each([['write'], ['read write'], ['admin']])('lets a %s token call tools', async (scope) => {
+      expect((await postInSession(issue('', scope), call('tools/call'))).status).toBe(200);
+    });
+
+    it('keeps tokens with only custom scopes unrestricted', async () => {
+      expect((await postInSession(issue('', 'custom'), call('tools/call'))).status).toBe(200);
+    });
+
+    it('applies the scope to legacy SSE messages and forwards the parsed body', async () => {
+      const token = issue('', 'read');
+      transports['sse-global'] = {
+        transport: (
+          jest.requireMock('@modelcontextprotocol/server-legacy/sse') as any
+        ).SSEServerTransport('/messages', undefined),
+        group: '',
+      };
+      const send = (body: unknown) =>
+        request(app)
+          .post('/messages?sessionId=sse-global')
+          .set('Authorization', `Bearer ${token}`)
+          .send(body as object);
+      expectScopeRejection(await send([call('ping', 1), call('tools/call', 2)]));
+      const allowed = await send(call('tools/list'));
+      expect(allowed.status).toBe(202);
+      expect(allowed.body.forwarded).toEqual(call('tools/list'));
+      // A body the scope check cannot read is denied rather than forwarded.
+      expectScopeRejection(
+        await request(app)
+          .post('/messages?sessionId=sse-global')
+          .set('Authorization', `Bearer ${token}`)
+          .set('Content-Type', 'text/plain')
+          .send('{"jsonrpc":"2.0","id":1,"method":"tools/call"}'),
+      );
+    });
+  });
 });

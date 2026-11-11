@@ -8,7 +8,7 @@ import {
   handleAuthenticateRequest,
 } from '../services/oauthServerService.js';
 import { findOAuthClientIncludingCimd, isCimdClientId } from '../services/cimdClientService.js';
-import { getSystemConfigDao, getGroupDao, getServerDao } from '../dao/index.js';
+import { getSystemConfigDao } from '../dao/index.js';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import { resolveBetterAuthUser } from '../services/betterAuthSession.js';
 import { cloneDefaultOAuthServerConfig } from '../constants/oauthServerDefaults.js';
@@ -22,7 +22,12 @@ import {
   type OAuthConsentContext,
   type ConsentClientInfo,
 } from '../utils/frontendShell.js';
-import { parseResourceTarget, type ResourceTarget } from '../utils/oauthConsentResource.js';
+import type { ResourceTarget } from '../utils/oauthConsentResource.js';
+import {
+  describeResourceTarget,
+  getResourceAuthorizationError,
+} from '../services/oauthResourceBinding.js';
+import { getPublicResourceBase } from '../utils/protectedResource.js';
 
 const { Request: OAuth2Request, Response: OAuth2Response } = OAuth2Server;
 
@@ -208,6 +213,8 @@ const generateAuthorizeHtml = (
     approveButtonLabel: string;
     denyButtonLabel: string;
     formFields: string;
+    /** What the token will cover (RFC 8707 resource), see formatResourceLabel. */
+    resourceLabel?: string;
   },
 ): string => {
   const backgroundColor = '#eef5ff';
@@ -256,6 +263,14 @@ const generateAuthorizeHtml = (
             <span class="client-box-label">${escapeHtml(options.clientName ? 'Application' : 'Client')}</span>
             <span class="client-box-name">${escapeHtml(options.clientName || '')}</span>
           </div>
+          ${
+            options.resourceLabel
+              ? `<div class="client-box">
+            <span class="client-box-label">${escapeHtml('Access to')}</span>
+            <span class="client-box-name">${escapeHtml(options.resourceLabel)}</span>
+          </div>`
+              : ''
+          }
           <div class="scopes">
             <div class="scopes-title">${escapeHtml('This application will be able to:')}</div>
             ${options.scopes
@@ -294,37 +309,72 @@ const generateAuthorizeHtml = (
 };
 
 /**
- * Resolve an RFC 8707 `resource` URI into a display target for the consent
- * screen, disambiguating `/mcp/{name}` between a group and a single server.
- * Best-effort: unknown or unresolvable targets are surfaced as-is, never
- * blocking the authorization request.
+ * Describe the RFC 8707 `resource` for the consent screen with the same parsing
+ * that enforces the token's audience. No resource means every MCP server the
+ * user can access, which is what such a token covers.
  */
-async function resolveResourceTarget(raw: string | undefined): Promise<ResourceTarget | undefined> {
-  if (!raw) {
-    return undefined;
-  }
-
-  const parsed = parseResourceTarget(raw);
-  if (parsed.kind !== 'target' || !parsed.name) {
-    return parsed;
-  }
-
+async function resolveResourceTarget(
+  req: Request,
+  raw: string | undefined,
+): Promise<ResourceTarget | undefined> {
   try {
-    const [group, server] = await Promise.all([
-      getGroupDao().findByName(parsed.name),
-      getServerDao().findById(parsed.name),
-    ]);
-    if (group) {
-      return { ...parsed, kind: 'group' };
-    }
-    if (server) {
-      return { ...parsed, kind: 'server' };
-    }
-    return { ...parsed, kind: 'unknown' };
+    const systemConfig = await getSystemConfigDao().get();
+    return await describeResourceTarget(raw ?? '', getPublicResourceBase(req, systemConfig));
   } catch (error) {
     logger.warn('Failed to resolve OAuth consent resource target:', error);
-    return { ...parsed, kind: 'unknown' };
+    return raw ? { raw, path: raw, kind: 'unknown' } : undefined;
   }
+}
+
+// Mirrors resourceLabel in frontend/src/pages/OAuthConsentPage.tsx.
+const formatResourceLabel = (
+  target: ResourceTarget,
+  t: (key: string, options?: Record<string, string>) => string,
+): string => {
+  switch (target.kind) {
+    case 'all':
+      return t('oauthServer.resourceAll');
+    case 'smart':
+      return target.name
+        ? `${t('oauthServer.resourceSmart')}: ${t('oauthServer.resourceGroup', { name: target.name })}`
+        : t('oauthServer.resourceSmart');
+    case 'server':
+      return t('oauthServer.resourceServer', { name: target.name ?? '' });
+    case 'group':
+      return t('oauthServer.resourceGroup', { name: target.name ?? '' });
+    default:
+      return target.name || target.raw;
+  }
+};
+
+/**
+ * RFC 8707 §2: reject a `resource` this hub does not serve (another origin, a
+ * non-MCP path, another user's route) with invalid_target before any approval
+ * stores it. Returns false after redirecting with the error.
+ */
+async function checkAuthorizationResource(
+  req: Request,
+  res: Response,
+  resource: string | undefined,
+  redirectUri: string,
+  state: string | undefined,
+  username?: string,
+): Promise<boolean> {
+  if (!resource) return true;
+  const systemConfig = await getSystemConfigDao().get();
+  const error = getResourceAuthorizationError(
+    resource,
+    getPublicResourceBase(req, systemConfig),
+    username,
+  );
+  if (!error) return true;
+  const redirectUrl = new URL(redirectUri);
+  redirectUrl.searchParams.set('error', 'invalid_target');
+  redirectUrl.searchParams.set('error_description', error);
+  setIssuerParam(redirectUrl, await resolveIssuer(req));
+  if (state) redirectUrl.searchParams.set('state', state);
+  res.redirect(redirectUrl.toString());
+  return false;
 }
 
 /**
@@ -449,6 +499,8 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
+    if (!(await checkAuthorizationResource(req, res, resource, redirect_uri, state))) return;
+
     // Check if user is authenticated (including via JWT token)
     let user = (req as any).user;
     if (!user) {
@@ -466,6 +518,11 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       // Redirect to login page with return URL
       const returnUrl = encodeURIComponent(req.originalUrl);
       res.redirect(`/login?returnUrl=${returnUrl}`);
+      return;
+    }
+
+    const username = (user as { username?: string }).username;
+    if (!(await checkAuthorizationResource(req, res, resource, redirect_uri, state, username))) {
       return;
     }
 
@@ -531,6 +588,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       contacts: client.metadata?.contacts,
       applicationType: client.metadata?.application_type,
     };
+    const resourceTarget = await resolveResourceTarget(req, resource);
     const consentContext: OAuthConsentContext = {
       clientName: client.name || '',
       scopes,
@@ -542,7 +600,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       codeChallenge: code_challenge || undefined,
       codeChallengeMethod: code_challenge_method || undefined,
       consentTicket: consentTicket || undefined,
-      resource: await resolveResourceTarget(resource),
+      resource: resourceTarget,
       client: consentClientInfo,
     };
 
@@ -573,6 +631,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
           denyButtonLabel:
             t('oauthServer.buttons.denySubtitle') || 'You can always grant access later.',
           formFields,
+          resourceLabel: resourceTarget ? formatResourceLabel(resourceTarget, t) : undefined,
         },
       ),
     );
@@ -635,6 +694,20 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const resource = typeof req.body.resource === 'string' ? req.body.resource : '';
+    if (
+      !(await checkAuthorizationResource(
+        req,
+        res,
+        resource,
+        validatedRedirectUri,
+        state,
+        user.username,
+      ))
+    ) {
+      return;
+    }
+
     await authorizeAndRedirect(
       req,
       res,
@@ -642,7 +715,7 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
         ...user,
         approvalContext: {
           redirectUri: validatedRedirectUri,
-          resource: typeof req.body.resource === 'string' ? req.body.resource : '',
+          resource,
         },
       },
       validatedRedirectUri,

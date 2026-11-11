@@ -11,6 +11,7 @@ const groups = [GROUP_A, GROUP_B];
 const systemConfig = {
   routing: { enableGlobalRoute: true, enableGroupNameRoute: true, enableBearerAuth: true },
   oauthServer: { enabled: true, allowedScopes: ['read', 'write'] },
+  install: { baseUrl: 'https://hub.example' },
 };
 
 jest.mock('../../src/dao/index.js', () => ({
@@ -238,6 +239,32 @@ describe('OAuth token enforcement on MCP transports', () => {
           .set('Authorization', `Bearer ${beta}`)
           .send({ jsonrpc: '2.0', id: 1, method: 'ping' }),
       );
+    });
+
+    it.each([
+      ['another origin', 'https://evil.example/mcp'],
+      ['another origin with the same group', 'https://evil.example/mcp/beta'],
+      ['another origin on smart routing', 'https://evil.example/mcp/$smart'],
+      ['another port', 'https://hub.example:8443/mcp'],
+    ])('rejects a token whose audience is %s on every route', async (_label, resource) => {
+      const token = issue(resource);
+      for (const path of ['/mcp', '/mcp/alpha', '/mcp/beta', '/mcp/$smart', '/alice/mcp']) {
+        expectAudienceRejection(await post(path, token));
+      }
+    });
+
+    it('accepts only resources under the install URL path when one is configured', async () => {
+      const previous = systemConfig.install;
+      systemConfig.install = { baseUrl: `${HUB}/hub` };
+      try {
+        expect((await post('/mcp/alpha', issue(`${HUB}/hub/mcp/alpha`))).status).toBe(200);
+        expect((await post('/mcp/alpha', issue(`${HUB}/hub`))).status).toBe(200);
+        // Same origin, but not under the hub's path: another application.
+        expectAudienceRejection(await post('/mcp/alpha', issue(`${HUB}/mcp/alpha`)));
+        expectAudienceRejection(await post('/mcp/alpha', issue(`${HUB}/mcp`)));
+      } finally {
+        systemConfig.install = previous;
+      }
     });
 
     it('keeps legacy tokens without a stored resource working and warns once', async () => {

@@ -54,7 +54,10 @@ const OAuthConsentPage: React.FC = () => {
       case 'all':
         return t('oauthServer.resourceAll');
       case 'smart':
-        return t('oauthServer.resourceSmart');
+        // `$smart/<group>` covers smart routing within that group only.
+        return resource.name
+          ? `${t('oauthServer.resourceSmart')}: ${t('oauthServer.resourceGroup', { name: resource.name })}`
+          : t('oauthServer.resourceSmart');
       case 'server':
         return t('oauthServer.resourceServer', { name: resource.name ?? '' });
       case 'group':
@@ -191,18 +194,20 @@ const OAuthConsentPage: React.FC = () => {
                 <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--hub-ink)' }}>
                   {resourceLabel(context.resource)}
                 </span>
-                <span
-                  className="hub-mono"
-                  style={{
-                    fontSize: 11.5,
-                    color: 'var(--hub-ink-2)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {context.resource.raw}
-                </span>
+                {context.resource.raw ? (
+                  <span
+                    className="hub-mono"
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--hub-ink-2)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {context.resource.raw}
+                  </span>
+                ) : null}
               </div>
             ) : null}
 

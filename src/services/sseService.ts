@@ -49,7 +49,11 @@ import {
 import type { HostedAuthContext } from './hostedAuthService.js';
 import { isHostedModeEnabled } from './hostedMode.js';
 import { authenticateForwardAuthToken } from './forwardAuthService.js';
-import { getPublicResourceUrl, getResourceMetadataUrl } from '../utils/protectedResource.js';
+import {
+  getPublicResourceBase,
+  getPublicResourceUrl,
+  getResourceMetadataUrl,
+} from '../utils/protectedResource.js';
 import { logger } from '../utils/logger.js';
 import { isReplicaMode } from '../utils/replicaMode.js';
 
@@ -491,7 +495,7 @@ const oauthGrantResult = async (
       token.resource,
       (req.params as { group?: string }).group,
       user.username,
-      systemConfig,
+      getPublicResourceBase(req, systemConfig),
     ))
   ) {
     logger.warn(

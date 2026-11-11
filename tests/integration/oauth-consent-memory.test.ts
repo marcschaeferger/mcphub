@@ -58,6 +58,7 @@ jest.mock('../../src/dao/index.js', () => ({
   getSystemConfigDao: () => ({
     get: async () => ({
       oauthServer: { enabled: true, alwaysShowApprovalScreen, allowedScopes, requireState },
+      install: { baseUrl: 'https://hub.example' },
     }),
   }),
 }));
@@ -65,6 +66,7 @@ jest.mock('../../src/dao/DaoFactory.js', () => ({
   getSystemConfigDao: () => ({
     get: async () => ({
       oauthServer: { enabled: true, alwaysShowApprovalScreen, allowedScopes, requireState },
+      install: { baseUrl: 'https://hub.example' },
     }),
   }),
 }));

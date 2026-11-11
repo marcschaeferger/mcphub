@@ -234,11 +234,19 @@ const normalizeBearerScopeParam = (groupParam?: string): string | undefined => {
   return groupParam;
 };
 
-const getRequestSessionId = (req: Request): string | undefined =>
-  (req.headers['mcp-session-id'] || req.query.sessionId) as string | undefined;
+// Where a transport takes its session ID from: legacy SSE POST /messages
+// delivers to `?sessionId`, Streamable HTTP to the `mcp-session-id` header. The
+// session checked must be the session served, so each handler reads only its
+// own source (a header naming another session must not pass the checks).
+type SessionIdSource = 'header' | 'query';
 
-const attachSessionGroupToRequest = (req: Request): void => {
-  const sessionId = getRequestSessionId(req);
+const getRequestSessionId = (req: Request, source: SessionIdSource): string | undefined => {
+  const value = source === 'query' ? req.query.sessionId : req.headers['mcp-session-id'];
+  return typeof value === 'string' ? value : undefined;
+};
+
+const attachSessionGroupToRequest = (req: Request, source: SessionIdSource): void => {
+  const sessionId = getRequestSessionId(req, source);
   const sessionGroup = sessionId ? transports[sessionId]?.group : undefined;
   if (sessionGroup && !req.params.group) {
     req.params.group = sessionGroup;
@@ -677,9 +685,9 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
 const authorizeGroupRoute = async (
   req: Request,
   res: Response,
-  legacySession = true,
+  sessionSource: SessionIdSource | false,
 ): Promise<boolean> => {
-  const sessionId = legacySession ? getRequestSessionId(req) : undefined;
+  const sessionId = sessionSource ? getRequestSessionId(req, sessionSource) : undefined;
   const session = sessionId ? transports[sessionId] : undefined;
   if (session && !(await groupRouteReferencesMatch(req.params.group, session.group))) {
     res.status(403).json({ error: 'forbidden', error_description: 'Session route mismatch' });
@@ -868,7 +876,7 @@ export const handleSseConnection = async (req: Request, res: Response): Promise<
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'header'))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
@@ -936,7 +944,7 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   // (no :group param), so isBearerKeyAllowedForRequest would see an empty paramValue
   // and reject the key with 401. Injecting the group here lets the validator use
   // the correct scope from the already-authenticated session.
-  attachSessionGroupToRequest(req);
+  attachSessionGroupToRequest(req, 'query');
 
   // Check bearer auth using filtered settings
   const bearerAuthResult = await validateBearerAuth(req);
@@ -946,7 +954,7 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'query'))) return;
 
   let parsedBody: unknown;
   if (bearerAuthResult.oauthReadOnly) {
@@ -959,7 +967,8 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
 
-  const sessionId = req.query.sessionId as string;
+  // The session checked above is the one delivered to (query only).
+  const sessionId = getRequestSessionId(req, 'query');
 
   // Validate sessionId
   if (!sessionId) {
@@ -1105,7 +1114,7 @@ export const handleMcpPostRequest = async (req: Request, res: Response): Promise
   const legacyRequest = await isLegacyRequest(webRequest, req.body);
   if (legacyRequest) {
     // Legacy clients may continue a group session through the global route.
-    attachSessionGroupToRequest(req);
+    attachSessionGroupToRequest(req, 'header');
   }
 
   // Check bearer auth using filtered settings
@@ -1116,7 +1125,7 @@ export const handleMcpPostRequest = async (req: Request, res: Response): Promise
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res, legacyRequest))) return;
+  if (!(await authorizeGroupRoute(req, res, legacyRequest ? 'header' : false))) return;
   if (!(await enforceOAuthScope(req, res, bearerAuthResult, req.body))) return;
 
   const currentUser = userContextService.getCurrentUser();
@@ -1324,7 +1333,7 @@ export const handleMcpOtherRequest = async (req: Request, res: Response) => {
 
   // Streamable HTTP clients may continue an existing session on the global route.
   // Reuse the session's group before bearer-scope validation in that case.
-  attachSessionGroupToRequest(req);
+  attachSessionGroupToRequest(req, 'header');
 
   // Check bearer auth using filtered settings
   const bearerAuthResult = await validateBearerAuth(req);
@@ -1334,7 +1343,7 @@ export const handleMcpOtherRequest = async (req: Request, res: Response) => {
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'header'))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;

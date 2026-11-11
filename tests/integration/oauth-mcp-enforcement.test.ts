@@ -267,6 +267,32 @@ describe('OAuth token enforcement on MCP transports', () => {
       }
     });
 
+    it('checks the session in ?sessionId on /messages, not the mcp-session-id header', async () => {
+      const { SSEServerTransport } = jest.requireMock(
+        '@modelcontextprotocol/server-legacy/sse',
+      ) as any;
+      const alphaTransport = SSEServerTransport('/messages', undefined);
+      const betaTransport = SSEServerTransport('/messages', undefined);
+      transports['sse-alpha'] = { transport: alphaTransport, group: 'alpha' };
+      transports['sse-beta'] = { transport: betaTransport, group: 'beta' };
+      const beta = issue(`${HUB}/mcp/beta`);
+      const send = (header?: string) => {
+        const pending = request(app)
+          .post('/messages?sessionId=sse-alpha')
+          .set('Authorization', `Bearer ${beta}`);
+        return (header ? pending.set('mcp-session-id', header) : pending).send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'x' },
+        });
+      };
+      expectAudienceRejection(await send());
+      expectAudienceRejection(await send('sse-beta'));
+      expect(alphaTransport.handlePostMessage).not.toHaveBeenCalled();
+      expect(betaTransport.handlePostMessage).not.toHaveBeenCalled();
+    });
+
     it('keeps legacy tokens without a stored resource working and warns once', async () => {
       const warn = jest.spyOn(logger, 'warn');
       const token = issue(undefined);

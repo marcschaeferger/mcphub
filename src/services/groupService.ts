@@ -369,9 +369,40 @@ export const removeServerFromGroup = async (
   }
 };
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The group an MCP route segment names, resolved like the MCP router and the
+ * OAuth audience check do: by name, else by id when the segment is a UUID.
+ * getGroupByIdOrName matches id or name in list order, so a group named after
+ * another group's id could be served on a route authorized for the other one.
+ */
+export const findRouteGroup = async (reference: string): Promise<IGroup | null> => {
+  const groupDao = getGroupDao();
+  const byName = await groupDao.findByName(reference);
+  if (byName) return byName;
+  return UUID_PATTERN.test(reference) ? groupDao.findById(reference) : null;
+};
+
+/** `routeReference`: `groupId` is an MCP route segment (see findRouteGroup). */
+export interface GroupLookupOptions {
+  routeReference?: boolean;
+}
+
+const lookupGroup = async (
+  groupId: string,
+  options?: GroupLookupOptions,
+): Promise<IGroup | undefined> =>
+  options?.routeReference
+    ? ((await findRouteGroup(groupId)) ?? undefined)
+    : getGroupByIdOrName(groupId);
+
 // Get all servers in a group
-export const getServersInGroup = async (groupId: string): Promise<string[]> => {
-  const group = await getGroupByIdOrName(groupId);
+export const getServersInGroup = async (
+  groupId: string,
+  options?: GroupLookupOptions,
+): Promise<string[]> => {
+  const group = await lookupGroup(groupId, options);
   if (!group) return [];
   const normalizedServers = normalizeGroupServers(group.servers);
   return normalizedServers.map((server) => server.name);
@@ -381,16 +412,20 @@ export const getServersInGroup = async (groupId: string): Promise<string[]> => {
 export const getServerConfigInGroup = async (
   groupId: string,
   serverName: string,
+  options?: GroupLookupOptions,
 ): Promise<IGroupServerConfig | undefined> => {
-  const group = await getGroupByIdOrName(groupId);
+  const group = await lookupGroup(groupId, options);
   if (!group) return undefined;
   const normalizedServers = normalizeGroupServers(group.servers);
   return normalizedServers.find((server) => server.name === serverName);
 };
 
 // Get all server configurations in a group
-export const getServerConfigsInGroup = async (groupId: string): Promise<IGroupServerConfig[]> => {
-  const group = await getGroupByIdOrName(groupId);
+export const getServerConfigsInGroup = async (
+  groupId: string,
+  options?: GroupLookupOptions,
+): Promise<IGroupServerConfig[]> => {
+  const group = await lookupGroup(groupId, options);
   if (!group) return [];
   return normalizeGroupServers(group.servers);
 };

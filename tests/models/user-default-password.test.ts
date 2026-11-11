@@ -32,11 +32,13 @@ describe('initializeDefaultUser', () => {
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     // Reset env var between tests
     delete process.env.ADMIN_PASSWORD;
+    delete process.env.MCPHUB_DEV_DEFAULT_ADMIN;
   });
 
   afterEach(() => {
     consoleLogSpy.mockRestore();
     delete process.env.ADMIN_PASSWORD;
+    delete process.env.MCPHUB_DEV_DEFAULT_ADMIN;
     if (originalNodeEnv === undefined) {
       delete process.env.NODE_ENV;
     } else {
@@ -77,8 +79,25 @@ describe('initializeDefaultUser', () => {
     expect(password.length).toBeGreaterThanOrEqual(16);
   });
 
-  it('should use admin123 when NODE_ENV is development and no ADMIN_PASSWORD env var is set', async () => {
+  it('should NOT use admin123 when only NODE_ENV=development is set (copied .env.example)', async () => {
     process.env.NODE_ENV = 'development';
+    mockFindAll.mockResolvedValue([]);
+    mockCreateWithHashedPassword.mockResolvedValue({
+      username: 'admin',
+      password: 'hashed',
+      isAdmin: true,
+    });
+
+    await initializeDefaultUser();
+
+    const [, password] = mockCreateWithHashedPassword.mock.calls[0];
+    expect(password).not.toBe('admin123');
+    expect(password.length).toBeGreaterThanOrEqual(16);
+  });
+
+  it('should use admin123 for pnpm dev (NODE_ENV=development + MCPHUB_DEV_DEFAULT_ADMIN=1)', async () => {
+    process.env.NODE_ENV = 'development';
+    process.env.MCPHUB_DEV_DEFAULT_ADMIN = '1';
     mockFindAll.mockResolvedValue([]);
     mockCreateWithHashedPassword.mockResolvedValue({
       username: 'admin',

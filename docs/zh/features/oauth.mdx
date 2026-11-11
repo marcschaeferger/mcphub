@@ -243,6 +243,15 @@ Dashboard 返回连接器专属的 MCPHub `/oauth/relay/<name>?state=…` 地址
 Mock 集成测试覆盖不同用户、回调恢复、code 兑换、刷新及带认证的 MCP 请求。真实 Microsoft 兼容性尚未验证，上线前应验证应用注册、broker 模式、scope 及刷新生命周期。
 
 
+## 令牌受众与权限范围（MCPHub 作为授权服务器）
+
+MCPHub 自带 OAuth 服务器签发的访问令牌受用户批准内容约束：
+
+- **受众（RFC 8707 `resource`）**：批准的 `resource` 随访问令牌和刷新令牌一起保存（数据库模式下为 `oauth_tokens.resource` 列）。每个 MCP 请求（`/mcp`、`/sse`、`/messages` 及其 `/:user/…` 变体）都必须落在令牌的资源范围内，否则返回 `403` 和 `WWW-Authenticate: Bearer error="invalid_token"`。`/mcp`（或仅主机名、或未提供 `resource`）覆盖用户可访问的全部路由；`/mcp/<group>` 仅覆盖该分组（按名称或 ID 访问均视为同一分组）；`/mcp/<server>` 与 `/mcp/$smart[/<group>]` 仅覆盖对应目标。
+- **令牌请求**：发往 `/oauth/token` 的 `resource` 必须在已批准范围内，否则返回 `invalid_target`（授权码或刷新令牌不会被消耗）。刷新时默认绑定到授权记录中的资源。
+- **权限范围**：`read` 只允许 `initialize`、`ping`、通知、各类 list、`prompts/get`、`resources/read` 与 `completion/complete`；`tools/call`（包括 `$smart` 的元工具）需要 `write`（或 `admin`）。批量请求逐条检查，拒绝时返回 `403` 与 `error="insufficient_scope", scope="write"`。仅含自定义 scope 的令牌不受限制。
+- **升级兼容**：升级前签发、未保存资源的令牌在过期前仍可访问所有路由，并对每个令牌记录一次警告；刷新时若存在授权记录则绑定到其资源。
+
 ## 记忆下游应用的授权确认
 
 MCPHub 自身的 OAuth 授权服务器默认在每次授权时显示确认页。管理员可在 **设置 → OAuth 服务器** 中开启 **记住用户授权** 并调整 **授权记忆有效期（秒）**，也可通过 `systemConfig.oauthServer` 启用授权记忆（`PUT /api/system-config` 同样支持这些字段）：

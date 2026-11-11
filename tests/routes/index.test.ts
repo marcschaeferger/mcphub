@@ -367,6 +367,28 @@ describe('initRoutes authenticated API rate limiting', () => {
     expect(handles).toHaveLength(3);
   });
 
+  it.each([
+    ['get', '/cloud/servers/:serverName/tools'],
+    ['post', '/cloud/servers/:serverName/tools/:toolName/call'],
+  ])('gates %s %s (operator MCPRouter key) behind the admin middleware', async (method, path) => {
+    const app = express();
+
+    await initRoutes(app);
+
+    const apiRouter = findMountedRouter(app);
+    const protectedRouter = apiRouter.stack?.find(
+      (layer) => layer.name === 'router' && layer.handle?.stack,
+    )?.handle;
+
+    const route = protectedRouter?.stack?.find(
+      (layer) => layer.route?.path === path && Boolean(layer.route?.methods[method]),
+    );
+    const handles = route?.route?.stack?.map((layer) => layer.handle) ?? [];
+
+    expect(handles[0]).toBe(requireAdminMiddleware);
+    expect(handles[handles.length - 1]).toBe(routeHandler);
+  });
+
   it('matches public auth routes before the shared authenticated rate limiter', async () => {
     const app = express();
 

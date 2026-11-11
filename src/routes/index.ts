@@ -478,8 +478,18 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   authenticatedRouter.get('/cloud/categories/:category', getCloudServersByCategory);
   authenticatedRouter.get('/cloud/tags', getAllCloudTags);
   authenticatedRouter.get('/cloud/tags/:tag', getCloudServersByTag);
-  authenticatedRouter.get('/cloud/servers/:serverName/tools', getCloudServerToolsList);
-  authenticatedRouter.post('/cloud/servers/:serverName/tools/:toolName/call', callCloudTool);
+  // Listing and calling cloud tools spends the operator's MCPRouter API key and
+  // bypasses server visibility/sharing, so only admins may use them.
+  authenticatedRouter.get(
+    '/cloud/servers/:serverName/tools',
+    requireAdminMiddleware,
+    getCloudServerToolsList,
+  );
+  authenticatedRouter.post(
+    '/cloud/servers/:serverName/tools/:toolName/call',
+    requireAdminMiddleware,
+    callCloudTool,
+  );
 
   // Registry routes (proxy to official MCP registry)
   authenticatedRouter.get('/registry/servers', getAllRegistryServers);

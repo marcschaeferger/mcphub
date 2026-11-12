@@ -83,10 +83,13 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git procps tini \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# The pip in the python base image vendors urllib3/msgpack/setuptools versions
-# with known HIGH advisories. uv/uvx do not use it, but users may; upgrade it.
-ARG PIP_VERSION=26.3
-RUN python -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
+# The runtime ships no pip. The pip in the python base image vendors urllib3,
+# msgpack and setuptools versions with known HIGH advisories, and MCPHub never
+# calls it: uv/uvx start stdio Python servers and `uv pip` replaces `pip`.
+# Derived images that need pip can add it themselves.
+RUN python -m pip uninstall -y pip \
+  && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
+  && rm -rf /usr/local/lib/python3.13/site-packages/pip* /root/.cache
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

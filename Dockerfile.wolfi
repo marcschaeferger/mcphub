@@ -101,7 +101,7 @@ RUN if [ "$INSTALL_EXT" = "true" ]; then \
 # Runtime tools from Wolfi apk instead of apt: git (uvx/npx git+ sources),
 # procps (`ps` for tree-kill, #1072), tini (reaps stdio server processes), bash
 # and setpriv (entrypoint privilege drop; busybox lacks setpriv), curl (kept
-# for existing user healthchecks), python 3.13 with pip. uv/uvx are not taken
+# for existing user healthchecks), python 3.13 (no pip). uv/uvx are not taken
 # from apk: they come from the same pinned ghcr.io image as in the Debian variant.
 # libstdc++/libgcc are needed by the official Node binary. Versions are not
 # pinned on purpose: the digest-pinned base plus a fresh index picks up Wolfi
@@ -109,7 +109,7 @@ RUN if [ "$INSTALL_EXT" = "true" ]; then \
 # hadolint ignore=DL3018
 RUN apk upgrade --no-cache \
   && apk add --no-cache bash ca-certificates-bundle curl git procps tini setpriv \
-    libstdc++ libgcc python-3.13 py3.13-pip \
+    libstdc++ libgcc python-3.13 \
   && python3 --version
 
 # wolfi-base ships no bash, so the pipefail shell is only set once apk has
@@ -117,12 +117,6 @@ RUN apk upgrade --no-cache \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY --from=uv /uv /uvx /usr/local/bin/
-
-# Same pip pin as the Debian variant. Wolfi's py3.13-pip lags behind it (26.2.2
-# when this was written), so it is upgraded in place; uv/uvx do not use pip,
-# but users of the image may.
-ARG PIP_VERSION=26.3
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
 
 # Node.js + npm 11 from the official image (see the header comment).
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node

@@ -74,3 +74,4 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             INSTALL_EXT=${{ matrix.variant == 'full' && 'true' || 'false' }}
+            VERSION=${{ steps.meta.outputs.version }}

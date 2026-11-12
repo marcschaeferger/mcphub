@@ -36,7 +36,7 @@ This fork carries security changes that are not yet upstream:
   `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are set, Docker Hub. `latest*` moves only on a
   stable `vX.Y.Z` tag; a prerelease such as `v1.2.3-rc1` gets only its version tag. Per variant
   it builds an amd64 image, runs `scripts/docker-smoke.sh` (not for full, which runs as root by
-  design) and the Trivy gate (HIGH+ with a fix, `.trivyignore`); only then it pushes
+  design) and the Trivy gate (HIGH+ with a fix); only then it pushes
   `linux/amd64` and `linux/arm64` from the same build cache by digest, with no tag. It checks that
   the pushed amd64 layers equal the scanned ones, scans the pushed amd64 and arm64 images from
   the registry with the same gate, and only then points the tags at the digest and signs it.
@@ -94,14 +94,6 @@ docker buildx imagetools inspect ghcr.io/marcschaeferger/mcphub:latest \
 
 For a single-platform image or a platform digest, `--format '{{json .SBOM}}'` and
 `--format '{{json .Provenance}}'` print the attestation directly.
-
-## Accepted findings
-
-Listed in `.trivyignore` (keep both in sync):
-
-| ID | Package | Reason |
-| --- | --- | --- |
-| CVE-2025-47273, CVE-2026-59890, GHSA-xmj3-9gf7-h52w | setuptools 70.3.0 | Only listed in pip's `vendor.txt`; pip vendors `pkg_resources`, not the affected `PackageIndex`, sdist or legacy-wheel code. |
 
 ## Upstream sync
 

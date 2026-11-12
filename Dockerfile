@@ -83,10 +83,21 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git procps tini \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# The pip in the python base image vendors urllib3/msgpack/setuptools versions
-# with known HIGH advisories. uv/uvx do not use it, but users may; upgrade it.
-ARG PIP_VERSION=26.3
-RUN python -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
+# The runtime ships no pip. The pip in the python base image vendors urllib3,
+# msgpack and setuptools versions with known HIGH advisories, and MCPHub never
+# calls it: uv/uvx start stdio Python servers and `uv pip` replaces `pip`.
+# The pip wheel bundled with ensurepip goes too, otherwise `python -m ensurepip`
+# reinstalls that same pip offline; `uv venv` replaces `python -m venv` (which
+# then needs --without-pip). Derived images that need pip can add it themselves.
+# Paths come from sysconfig so a Python minor bump cannot leave pip behind, and
+# the build fails if pip or a pip wheel is still there.
+RUN python -m pip uninstall -y pip \
+  && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
+  && purelib="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+  && stdlib="$(python -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')" \
+  && rm -rf "$purelib"/pip "$purelib"/pip-* "$stdlib"/ensurepip/_bundled/pip-*.whl /root/.cache \
+  && ! python -m pip --version 2>/dev/null \
+  && [ -z "$(find "$purelib" "$stdlib" -name 'pip-*.whl' -print -quit)" ]
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

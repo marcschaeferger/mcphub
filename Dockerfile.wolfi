@@ -101,15 +101,21 @@ RUN if [ "$INSTALL_EXT" = "true" ]; then \
 # Runtime tools from Wolfi apk instead of apt: git (uvx/npx git+ sources),
 # procps (`ps` for tree-kill, #1072), tini (reaps stdio server processes), bash
 # and setpriv (entrypoint privilege drop; busybox lacks setpriv), curl (kept
-# for existing user healthchecks), python 3.13 with pip. uv/uvx are not taken
-# from apk: they come from the same pinned ghcr.io image as in the Debian variant.
+# for existing user healthchecks), python 3.13 (no pip). python-3.13-base pulls
+# in py3-pip-wheel, so its wheel is deleted to keep `python -m ensurepip` from
+# reinstalling pip 26.2.2 offline; the build fails if pip or a pip wheel is left.
+# uv/uvx are not taken from apk: they come from the same pinned ghcr.io image
+# as in the Debian variant.
 # libstdc++/libgcc are needed by the official Node binary. Versions are not
 # pinned on purpose: the digest-pinned base plus a fresh index picks up Wolfi
 # security updates on every rebuild (same policy as the Debian variant).
 # hadolint ignore=DL3018
 RUN apk upgrade --no-cache \
   && apk add --no-cache bash ca-certificates-bundle curl git procps tini setpriv \
-    libstdc++ libgcc python-3.13 py3.13-pip \
+    libstdc++ libgcc python-3.13 \
+  && rm -f /usr/share/python-wheels/pip-*.whl \
+  && ! python3 -m pip --version 2>/dev/null \
+  && [ -z "$(find /usr/share/python-wheels /usr/lib/python3.13 -name 'pip-*.whl' -print -quit 2>/dev/null)" ] \
   && python3 --version
 
 # wolfi-base ships no bash, so the pipefail shell is only set once apk has
@@ -117,12 +123,6 @@ RUN apk upgrade --no-cache \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY --from=uv /uv /uvx /usr/local/bin/
-
-# Same pip pin as the Debian variant. Wolfi's py3.13-pip lags behind it (26.2.2
-# when this was written), so it is upgraded in place; uv/uvx do not use pip,
-# but users of the image may.
-ARG PIP_VERSION=26.3
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
 
 # Node.js + npm 11 from the official image (see the header comment).
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node

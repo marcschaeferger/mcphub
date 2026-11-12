@@ -84,6 +84,8 @@ docker build -f Dockerfile.wolfi -t mcphub:wolfi .
 
 Both base variants contain the same Node.js 22, npm 11, Python 3.13, uv/uvx and Git, so stdio servers started with `npx` or `uvx` behave the same. Derived images that install packages with `apt-get` need the Debian variant: the Wolfi variant uses `apk` instead. The `full` variant exists only on Debian, and `docker build --build-arg INSTALL_EXT=true -f Dockerfile.wolfi .` fails with an error that points there.
 
+The images ship no `pip`: `pip`, `pip3` and `python3 -m pip` are not installed, and the pip wheel that `python3 -m ensurepip` would install is removed too. Use `uvx`, `uv pip` or `uv tool` to run and install Python tools, and `uv venv` (or `python3 -m venv --without-pip`) to create virtual environments. Derived images that need pip can add it themselves.
+
 ### Building from Source
 
 ```bash

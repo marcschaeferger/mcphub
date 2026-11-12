@@ -8,7 +8,8 @@
 #   2. MCPHub runs as uid 10001,
 #   3. the admin login works,
 #   4. a stdio server started with uvx and one started with npx connect,
-#   5. a tool call is answered end to end.
+#   5. a tool call is answered end to end,
+#   6. the image ships no pip (nor a pip wheel) and `uv venv` still works.
 # Needs docker, curl and jq on the host. The credentials are random per run,
 # are never printed and the container is removed on exit.
 #
@@ -129,5 +130,17 @@ reply=$(api POST /api/tools/smoke-npx/echo "$(jq -nc --arg m "$MARKER" '{message
   || die "tool call request failed"
 printf '%s' "$reply" | grep -q "$MARKER" || die "tool call did not echo the marker"
 ok "tool call answered"
+
+# 6. no pip: no pip/pip3 command, no pip module, no wheel ensurepip could
+# reinstall it from, and uv creates a venv without it (as the runtime uid).
+docker exec "$CONTAINER" sh -c '! command -v pip && ! command -v pip3 && ! python3 -m pip --version' \
+  >/dev/null 2>&1 || die "pip is installed in the image"
+wheels=$(docker exec "$CONTAINER" python3 -c \
+  'import glob, sysconfig; print(" ".join(glob.glob(sysconfig.get_paths()["stdlib"] + "/ensurepip/_bundled/pip-*.whl") + glob.glob("/usr/share/python-wheels/pip-*.whl")))') \
+  || die "could not look for pip wheels"
+[ -z "$wheels" ] || die "pip wheel left in the image: $wheels"
+docker exec -u "$EXPECTED_UID" "$CONTAINER" uv venv --quiet /tmp/smoke-venv >/dev/null 2>&1 \
+  || die "uv venv failed"
+ok "no pip in the image, uv venv works"
 
 echo "PASS: $IMAGE"

@@ -1,8 +1,0 @@
-# Risk acceptances, see SECURITY.md ("Accepted findings"). Keep both in sync.
-
-# setuptools 70.3.0 is only listed in pip's _vendor/vendor.txt: pip vendors
-# pkg_resources, not PackageIndex, sdist or legacy wheel installs, which is
-# where these CVEs live. Clears once the python base image ships a newer pip.
-CVE-2025-47273
-CVE-2026-59890
-GHSA-xmj3-9gf7-h52w

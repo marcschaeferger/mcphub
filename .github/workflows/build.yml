@@ -2,9 +2,13 @@ name: Build
 
 # Publishes the debian, wolfi and full images to GHCR and (when configured)
 # Docker Hub. Each variant is first built for amd64, smoke-tested and scanned
-# by Trivy; only an image that passes is built multi-arch and pushed, with an
-# SBOM and max-mode provenance. Every pushed digest is then signed keyless
-# with cosign. See SECURITY.md ("Verifying images").
+# by Trivy; only an image that passes is built multi-arch and pushed by digest
+# (untagged), with an SBOM and max-mode provenance. The pushed amd64 and arm64
+# images are scanned again from the registry, and only then are the tags
+# (latest, X.Y.Z, edge, ...) pointed at that digest. Every pushed digest is
+# signed keyless with cosign. See SECURITY.md ("Verifying images").
+#
+# Manual runs publish edge* and are only allowed from main.
 
 on:
   push:
@@ -29,7 +33,19 @@ jobs:
       dockerhub-image: ${{ steps.names.outputs.dockerhub }}
       dockerhub-enabled: ${{ steps.dockerhub.outputs.enabled }}
       variants: ${{ steps.names.outputs.variants }}
+      stable: ${{ steps.names.outputs.stable }}
     steps:
+      # edge* is documented and verified as built from main; a manual run
+      # from any other ref (a feature branch, or a tag ref whose identity
+      # would look like a release) must not overwrite it.
+      - name: Manual runs only from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::manual runs publish edge images and are only allowed from refs/heads/main, not ${REF}"
+          exit 1
+
       - name: Image names and variants
         id: names
         env:
@@ -44,6 +60,14 @@ jobs:
             echo 'variants=["debian","wolfi","full"]' >> "$GITHUB_OUTPUT"
           else
             echo 'variants=["debian","wolfi"]' >> "$GITHUB_OUTPUT"
+          fi
+          # Only a stable vX.Y.Z tag moves latest*; a prerelease such as
+          # v1.2.3-rc1 (also matched by the v*.*.* trigger) gets only its
+          # version tag.
+          if [ "$RELEASE" = "true" ] && [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Docker Hub credentials present?
@@ -75,6 +99,8 @@ jobs:
       VARIANT: ${{ matrix.variant }}
       GATE_IMAGE: mcphub:gate-${{ matrix.variant }}
       GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr-image }}
+      DOCKERHUB_IMAGE: ${{ needs.prepare.outputs.dockerhub-image }}
+      DOCKERHUB_ENABLED: ${{ needs.prepare.outputs.dockerhub-enabled }}
       # debian is the default variant and carries the plain tags.
       SUFFIX: ${{ matrix.variant != 'debian' && format('-{0}', matrix.variant) || '' }}
       DOCKERFILE: ${{ matrix.variant == 'wolfi' && 'Dockerfile.wolfi' || 'Dockerfile' }}
@@ -109,7 +135,7 @@ jobs:
           tags: |
             type=raw,value=edge${{ env.SUFFIX }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=semver,pattern={{version}}${{ env.SUFFIX }},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=latest${{ env.SUFFIX }},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest${{ env.SUFFIX }},enable=${{ needs.prepare.outputs.stable == 'true' }}
           flavor: |
             latest=false
 
@@ -170,17 +196,21 @@ jobs:
 
       # Same context, Dockerfile, args, labels and cache as the gate build, so
       # the amd64 image is assembled from the layers that were just scanned.
-      - name: Build and push (multi-arch, SBOM, provenance)
+      # Pushed by digest only: no tag points at it until the checks below
+      # pass. `tags` here only names the repositories (no tag is pushed).
+      - name: Build and push by digest (multi-arch, SBOM, provenance)
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ env.DOCKERFILE }}
           platforms: linux/amd64,linux/arm64
-          push: true
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_ENABLED == 'true' && env.DOCKERHUB_IMAGE || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
@@ -190,7 +220,7 @@ jobs:
 
       # Proof that the pushed amd64 image is the one that passed the gate:
       # its layer diff IDs must equal those of the scanned image. On a
-      # mismatch the digest is not handed to the signing job.
+      # mismatch no tag is published and the digest is not handed to signing.
       - name: Pushed amd64 image matches the scanned image
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -205,6 +235,63 @@ jobs:
             exit 1
           fi
           echo "amd64 layers match the scanned image ($(jq length <<<"$scanned") layers)"
+
+      # The arm64 image is a separate artifact (other packages and binaries,
+      # see the uname -m branches in the Dockerfile), so the pushed digest is
+      # scanned per platform from the registry with the same gate settings.
+      - name: Trivy scan of the pushed digest (linux/amd64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+          TRIVY_IMAGE_SRC: remote
+        with:
+          scan-type: image
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.push.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+
+      - name: Trivy scan of the pushed digest (linux/arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+          TRIVY_IMAGE_SRC: remote
+        with:
+          scan-type: image
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.push.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+
+      # Promote: only now do the public tags point at the checked digest.
+      # Each tag is created from the digest in its own repository and then
+      # read back, so a tag can never name anything but that digest.
+      - name: Publish tags
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::invalid pushed digest"
+            exit 1
+          fi
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            repo="${tag%:*}"
+            docker buildx imagetools create --tag "$tag" "${repo}@${DIGEST}"
+            got=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error::${tag} resolves to ${got}, expected ${DIGEST}"
+              exit 1
+            fi
+            echo "${tag} -> ${DIGEST}"
+          done <<<"$TAGS"
 
       - name: Record digest for signing
         env:

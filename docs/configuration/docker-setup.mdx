@@ -37,18 +37,18 @@ MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container s
 
 ### Image variants
 
-Every release is published in three variants. The debian and wolfi variants run MCPHub as uid `10001` and are built, smoke-tested and Trivy-scanned in CI. The full variant runs as root.
+There are three image variants. Releases publish the debian and full variants. The wolfi variant is not published yet: build it yourself from `Dockerfile.wolfi`. The debian and wolfi variants run MCPHub as uid `10001`. The full variant runs as root.
+
+On pull requests to `main` and `develop`, pushes to `main` and a weekly schedule, the Security workflow builds a local amd64 image from `Dockerfile` and from `Dockerfile.wolfi`, smoke-tests both and scans them with Trivy. The images that releases publish are built separately by the Build workflow, multi-arch, and do not go through this smoke test and image scan.
 
 | Variant | Tags | Dockerfile | Use it when |
 | --- | --- | --- | --- |
 | debian | `latest`, `X.Y.Z`, `edge` | `Dockerfile` | Default choice. Debian base, `apt-get` available for derived images. |
-| wolfi | `latest-wolfi`, `X.Y.Z-wolfi`, `edge-wolfi` | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
+| wolfi | none, build from source | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
 | full | `latest-full`, `X.Y.Z-full`, `edge-full` | `Dockerfile` with `INSTALL_EXT=true` | Playwright browsers, Rust/Cargo or Docker-in-Docker are needed. Runs as root, see below. |
 
 ```bash
-docker pull samanhappy/mcphub:latest-wolfi
-
-# Build the Wolfi variant yourself
+# Build the Wolfi variant from a checkout of this repository
 docker build -f Dockerfile.wolfi -t mcphub:wolfi .
 ```
 

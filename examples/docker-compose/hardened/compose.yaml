@@ -1,0 +1,119 @@
+# Hardened MCPHub deployment with external MCP server containers.
+# See README.md. Start with:  docker compose up -d --build
+
+# MCPHub is built from the repository root: the upstream image
+# (samanhappy/mcphub:latest) has no uid-10001 user, /app/data or /home/mcphub
+# yet, so the volumes would be root-owned and unwritable for uid 10001.
+# MCPHUB_IMAGE only renames the build; point it at a prebuilt image that has
+# this layout and start without --build to use that image as is.
+x-mcphub-build: &mcphub-build
+  context: ../../..
+  args:
+    RUN_AS: "10001:10001"
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  # One-shot: copies the example settings into the data volume on first start.
+  # MCPHub rewrites its settings file (and writes credential/approval sidecars
+  # next to it), so the file cannot be a read-only bind mount. An existing
+  # settings file is never overwritten.
+  mcphub-seed:
+    build: *mcphub-build
+    image: ${MCPHUB_IMAGE:-mcphub-example:local}
+    user: "10001:10001"
+    <<: *hardening
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - test -f /app/data/mcp_settings.json || cp /seed/mcp_settings.json /app/data/mcp_settings.json
+    volumes:
+      - mcphub-data:/app/data
+      - ./mcp_settings.json:/seed/mcp_settings.json:ro
+    network_mode: none
+
+  mcphub:
+    build: *mcphub-build
+    image: ${MCPHUB_IMAGE:-mcphub-example:local}
+    user: "10001:10001"
+    <<: *hardening
+    tmpfs:
+      # No noexec here: stdio MCP servers started by MCPHub may unpack and run
+      # helpers from /tmp.
+      - /tmp:size=128m,mode=1777,uid=10001,gid=10001,nosuid
+    volumes:
+      - mcphub-data:/app/data
+      # HOME must be a volume: it holds the pre-installed mcp-server-fetch and
+      # the npx/uvx caches. A tmpfs would hide the pre-installed tool. A fresh
+      # named volume is initialised from the image (owner 10001).
+      - mcphub-home:/home/mcphub
+    ports:
+      - "127.0.0.1:${MCPHUB_PORT:-3000}:3000"
+    pids_limit: 512
+    mem_limit: 1g
+    cpus: 1.0
+    # HEALTHCHECK (/livez) is inherited from the image.
+    depends_on:
+      mcphub-seed:
+        condition: service_completed_successfully
+      everything:
+        condition: service_healthy
+      fetch-gateway:
+        condition: service_healthy
+    networks: [frontend, mcp]
+
+  # Native streamable-http MCP server. Reachable on the internal network only;
+  # it needs no internet access, so it has no egress network.
+  everything:
+    build: ./everything
+    image: mcphub-example-everything:local
+    user: "10002:10002"
+    <<: *hardening
+    environment:
+      # The server binds to loopback by default; the internal network needs 0.0.0.0.
+      HOST: 0.0.0.0
+    tmpfs:
+      - /tmp:size=32m,mode=1777,uid=10002,gid=10002,noexec,nosuid
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    networks: [mcp]
+
+  # stdio-only mcp-server-fetch behind the mcp-proxy gateway (/mcp, /sse).
+  # The fetch tool downloads web pages, so this is the one service that gets
+  # the extra "egress" network. Everything else stays internal.
+  # No auth by default; see README ("Gateway endpoints have no auth").
+  fetch-gateway:
+    build: ./fetch-gateway
+    image: mcphub-example-fetch-gateway:local
+    # --allowed-host: mcp-proxy rejects Host headers other than localhost
+    # (DNS-rebinding protection); MCPHub connects as fetch-gateway:8080.
+    command:
+      - --host=0.0.0.0
+      - --port=8080
+      - --allowed-host=fetch-gateway:8080
+      - --
+      - /opt/fetch/bin/mcp-server-fetch
+    user: "10003:10003"
+    <<: *hardening
+    tmpfs:
+      - /tmp:size=32m,mode=1777,uid=10003,gid=10003,noexec,nosuid
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    networks: [mcp, egress]
+
+networks:
+  frontend: {}
+  # No route to the outside: MCP servers cannot be reached from, or reach, the internet.
+  mcp:
+    internal: true
+  egress: {}
+
+volumes:
+  mcphub-data:
+  mcphub-home:

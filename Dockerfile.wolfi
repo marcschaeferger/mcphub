@@ -10,7 +10,7 @@
 # upstream 22.x security releases. npx launches stdio MCP servers, so Node and
 # npm are copied from the digest-pinned official Node image (glibc, same
 # release as the build stages) and npm is pinned to 11, exactly like the
-# Debian variant. Python, uv, git, tini, setpriv and procps come from Wolfi apk.
+# Debian variant. Python, uv, git, tini and procps come from Wolfi apk.
 #
 # Not supported here: --build-arg INSTALL_EXT=true (Playwright, Rust, Docker
 # engine). That needs apt and a root, privileged container: use the full
@@ -94,16 +94,16 @@ LABEL org.opencontainers.image.title="MCPHub" \
 # silently building an image without Playwright/Docker.
 ARG INSTALL_EXT=false
 RUN if [ "$INSTALL_EXT" = "true" ]; then \
-  echo "ERROR: INSTALL_EXT=true is not supported by Dockerfile.wolfi (Playwright, Rust and Docker-in-Docker need Debian and apt). Build the full variant from the Debian Dockerfile instead: docker build --build-arg INSTALL_EXT=true -f Dockerfile ." >&2; \
+  echo "ERROR: INSTALL_EXT=true is not supported by Dockerfile.wolfi (Playwright, Rust and Docker-in-Docker need Debian and apt). Build the full variant from the Debian Dockerfile instead: docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -f Dockerfile ." >&2; \
   exit 1; \
   fi
 
 # Runtime tools from Wolfi apk instead of apt: git (uvx/npx git+ sources),
 # procps (`ps` for tree-kill, #1072), tini (reaps stdio server processes), bash
-# and setpriv (entrypoint privilege drop; busybox lacks setpriv), curl (kept
-# for existing user healthchecks), python 3.13 (no pip). python-3.13-base pulls
-# in py3-pip-wheel, so its wheel is deleted to keep `python -m ensurepip` from
-# reinstalling pip 26.2.2 offline; the build fails if pip or a pip wheel is left.
+# (entrypoint.sh, mcphub-migrate), curl (kept for existing user healthchecks),
+# python 3.13 (no pip). python-3.13-base pulls in py3-pip-wheel, so its wheel
+# is deleted to keep `python -m ensurepip` from reinstalling pip 26.2.2
+# offline; the build fails if pip or a pip wheel is left.
 # uv/uvx are not taken from apk: they come from the same pinned ghcr.io image
 # as in the Debian variant.
 # libstdc++/libgcc are needed by the official Node binary. Versions are not
@@ -111,7 +111,7 @@ RUN if [ "$INSTALL_EXT" = "true" ]; then \
 # security updates on every rebuild (same policy as the Debian variant).
 # hadolint ignore=DL3018
 RUN apk upgrade --no-cache \
-  && apk add --no-cache bash ca-certificates-bundle curl git procps tini setpriv \
+  && apk add --no-cache bash ca-certificates-bundle curl git procps tini \
     libstdc++ libgcc python-3.13 \
   && rm -f /usr/share/python-wheels/pip-*.whl \
   && ! python3 -m pip --version 2>/dev/null \
@@ -160,18 +160,18 @@ COPY --chmod=0755 mcphub-migrate.sh /usr/local/bin/mcphub-migrate
 RUN install -d -o mcphub -g mcphub -m 0750 /app/data
 
 # Pre-install the fetch server for the runtime user, into its HOME, so the
-# cache management in MCPHub can still refresh or remove it.
+# cache management in MCPHub can still refresh or remove it. The npm and uv
+# cache directories exist up front so named volumes mounted there start out
+# owned by the mcphub user instead of root.
 USER ${MCPHUB_UID}:${MCPHUB_GID}
-RUN uv tool install --no-cache mcp-server-fetch
+RUN uv tool install --no-cache mcp-server-fetch \
+  && mkdir -p /home/mcphub/.npm /home/mcphub/.cache/uv
 
-# The container starts as root only so the entrypoint can hand root-owned
-# state (volumes from older images, daemon-created bind mounts) to the mcphub
-# user; it then runs MCPHub as uid ${MCPHUB_UID} via setpriv. It stays root
-# only for MCPHUB_RUN_AS_ROOT=true or
-# settings the mcphub user cannot write (see entrypoint.sh).
-# Strictly non-root platforms can run it with --user 10001:10001 /
-# runAsUser: 10001, or build it with --build-arg RUN_AS=10001:10001.
-ARG RUN_AS=0:0
+# MCPHub runs as uid ${MCPHUB_UID} from the start; nothing in the image
+# changes users or file owners at runtime. Volumes written by older images
+# (which ran as root) are handed over once with `mcphub-migrate`, run as root
+# (see docs/configuration/docker-setup.mdx, "Upgrading from root images").
+ARG RUN_AS=${MCPHUB_UID}:${MCPHUB_GID}
 USER ${RUN_AS}
 
 EXPOSE 3000

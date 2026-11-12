@@ -105,6 +105,9 @@ jobs:
       SUFFIX: ${{ matrix.variant != 'debian' && format('-{0}', matrix.variant) || '' }}
       DOCKERFILE: ${{ matrix.variant == 'wolfi' && 'Dockerfile.wolfi' || 'Dockerfile' }}
       INSTALL_EXT: ${{ matrix.variant == 'full' && 'true' || 'false' }}
+      # The images run as uid 10001 by default. full needs root for
+      # Docker-in-Docker, and its build fails unless RUN_AS says so.
+      RUN_AS: ${{ matrix.variant == 'full' && '0:0' || '10001:10001' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,11 +160,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
           build-args: |
             INSTALL_EXT=${{ env.INSTALL_EXT }}
+            RUN_AS=${{ env.RUN_AS }}
             VERSION=${{ steps.meta.outputs.version }}
 
-      # full keeps root for Docker-in-Docker by design (the entrypoint does not
-      # drop privileges when dockerd is present), so the smoke test's uid 10001
-      # check cannot pass on it. full is still scanned by Trivy below.
+      # full runs as root for Docker-in-Docker by design (RUN_AS=0:0), so the
+      # smoke test's uid 10001 check cannot pass on it. full is still scanned
+      # by Trivy below.
       - name: Smoke test
         if: matrix.variant != 'full'
         run: scripts/docker-smoke.sh "$GATE_IMAGE"
@@ -215,6 +219,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
           build-args: |
             INSTALL_EXT=${{ env.INSTALL_EXT }}
+            RUN_AS=${{ env.RUN_AS }}
             VERSION=${{ steps.meta.outputs.version }}
 
       # Proof that the pushed amd64 image is the one that passed the gate:

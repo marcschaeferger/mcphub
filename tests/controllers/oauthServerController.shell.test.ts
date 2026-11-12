@@ -35,6 +35,7 @@ type MockResponse = {
   redirect: jest.Mock;
   type: jest.Mock;
   send: jest.Mock;
+  setHeader: jest.Mock;
 };
 
 const createResponse = (): MockResponse => {
@@ -44,6 +45,7 @@ const createResponse = (): MockResponse => {
     redirect: jest.fn().mockReturnThis(),
     type: jest.fn().mockReturnThis(),
     send: jest.fn().mockReturnThis(),
+    setHeader: jest.fn().mockReturnThis(),
   };
 
   return res;
@@ -123,7 +125,7 @@ describe('oauthServerController getAuthorize consent shell', () => {
     );
   });
 
-  it('includes state, PKCE and token fields in the injected consent context when present', async () => {
+  it('includes state, PKCE and consent ticket fields in the injected consent context when present', async () => {
     (injectOAuthConsentShell as jest.Mock).mockReturnValue('<html>shell</html>');
 
     const req = createRequest({
@@ -135,7 +137,7 @@ describe('oauthServerController getAuthorize consent shell', () => {
         state: 'state-123',
         code_challenge: 'abc123',
         code_challenge_method: 'S256',
-        token: 'jwt-token',
+        consent_ticket: 'consent-ticket',
       },
     });
     const res = createResponse();
@@ -147,8 +149,11 @@ describe('oauthServerController getAuthorize consent shell', () => {
       state: 'state-123',
       codeChallenge: 'abc123',
       codeChallengeMethod: 'S256',
-      token: 'jwt-token',
+      consentTicket: 'consent-ticket',
     });
+    expect(context).not.toHaveProperty('token');
+    expect(res.setHeader).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 
   it('falls back to the legacy inline consent HTML when the frontend shell is unavailable', async () => {

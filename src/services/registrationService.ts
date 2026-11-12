@@ -16,6 +16,10 @@ import {
 export const isRegistrationUsernameReserved = async (username: string): Promise<boolean> => {
   // Legacy resources without an explicit owner belong to admin.
   if (username === 'admin') return true;
+  // Email-shaped names are reserved for SSO identities: SSO login may bind a
+  // verified email to the account with that username, so letting anyone pre-claim
+  // one would hand the attacker the victim's future account (pre-hijacking).
+  if (username.includes('@')) return true;
 
   const [servers, groups, clients, tokens, keys, hasUserConfig] = await Promise.all([
     getServerDao().findAll(),

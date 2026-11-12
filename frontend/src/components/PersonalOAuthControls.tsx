@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { apiGet, apiPost, apiDelete } from '../utils/fetchInterceptor';
 import { useToast } from '../contexts/ToastContext';
 import { ChevronDown } from 'lucide-react';
+import { toSafeAuthorizationUrl } from '../utils/oauthUrl';
 
 export default function PersonalOAuthControls({
   serverName,
@@ -24,7 +25,7 @@ export default function PersonalOAuthControls({
         .then((result) => {
           if (active && result.success) {
             setConnected(Boolean(result.data?.connected));
-            setAuthorizationUrl(result.data?.authorizationUrl);
+            setAuthorizationUrl(toSafeAuthorizationUrl(result.data?.authorizationUrl));
           }
         })
         .catch(() => undefined);
@@ -45,9 +46,10 @@ export default function PersonalOAuthControls({
       const result = disconnect ? await apiDelete(endpoint) : await apiPost(endpoint, {});
       if (!result.success) throw new Error(result.message || t('server.oauth.personalError'));
       setConnected(Boolean(result.data?.connected));
-      setAuthorizationUrl(result.data?.authorizationUrl);
-      if (result.data?.authorizationUrl && popup) {
-        popup.location.replace(result.data.authorizationUrl);
+      const nextAuthorizationUrl = toSafeAuthorizationUrl(result.data?.authorizationUrl);
+      setAuthorizationUrl(nextAuthorizationUrl);
+      if (nextAuthorizationUrl && popup) {
+        popup.location.replace(nextAuthorizationUrl);
       } else {
         popup?.close();
       }

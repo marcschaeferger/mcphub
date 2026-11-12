@@ -1,5 +1,6 @@
 import { findReusableApproval, resolveConsentScopes } from '../services/oauthApprovalService.js';
 import { getUserSessionVersion, resolveJwtUser } from '../utils/userSession.js';
+import { isQueryTokenAllowed, verifyUrlTicket } from '../utils/urlTicket.js';
 import { Request, Response } from 'express';
 import {
   getOAuthServer,
@@ -61,22 +62,34 @@ async function resolveBetterAuthUserForAuthorize(req: Request): Promise<Authenti
 }
 
 /**
- * Attempt to attach a user to the request based on a JWT token present in header, query, or body.
+ * Attempt to attach a user to the request from a JWT in the header or POST
+ * body, or from an `oauth-consent` ticket (query or body) bound to this
+ * request's client_id and redirect_uri. The session JWT itself is no longer
+ * taken from the query string: it leaked into proxy logs and browser history
+ * (MCPHUB_ALLOW_QUERY_TOKEN=true restores the legacy behaviour).
  */
 async function resolveUserFromRequest(req: Request): Promise<AuthenticatedUser | null> {
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+    string,
+    unknown
+  >;
   const headerToken = req.header('x-auth-token');
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
-  const bodyToken =
-    req.body && typeof (req.body as Record<string, unknown>).token === 'string'
-      ? ((req.body as Record<string, string>).token as string)
-      : undefined;
+  const queryToken =
+    isQueryTokenAllowed() && typeof req.query.token === 'string' ? req.query.token : undefined;
+  const bodyToken = typeof body.token === 'string' ? body.token : undefined;
   const token = headerToken || queryToken || bodyToken;
 
-  if (!token) {
-    return null;
+  let user = token ? await resolveJwtUser(token) : null;
+  if (!user) {
+    const ticket = readConsentTicket(req);
+    const params = req.method === 'GET' ? req.query : body;
+    if (ticket && typeof params.client_id === 'string' && typeof params.redirect_uri === 'string') {
+      user = await verifyUrlTicket(ticket, 'oauth-consent', {
+        client_id: params.client_id,
+        redirect_uri: params.redirect_uri,
+      });
+    }
   }
-
-  const user = await resolveJwtUser(token);
   return user
     ? {
         username: user.username,
@@ -85,6 +98,12 @@ async function resolveUserFromRequest(req: Request): Promise<AuthenticatedUser |
       }
     : null;
 }
+
+const readConsentTicket = (req: Request): string | undefined => {
+  if (typeof req.query.consent_ticket === 'string') return req.query.consent_ticket;
+  const bodyTicket = (req.body as Record<string, unknown> | undefined)?.consent_ticket;
+  return typeof bodyTicket === 'string' ? bodyTicket : undefined;
+};
 
 /**
  * Helper function to escape HTML
@@ -475,10 +494,14 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       }
     }
 
-    const requestToken = typeof req.query.token === 'string' ? req.query.token : '';
-    const tokenField = requestToken
-      ? `<input type="hidden" name="token" value="${escapeHtml(requestToken)}">`
+    // Echo only the request-bound consent ticket into the form, never a session
+    // JWT, so the approval POST can authenticate without the dashboard token.
+    const consentTicket = readConsentTicket(req) ?? '';
+    const tokenField = consentTicket
+      ? `<input type="hidden" name="consent_ticket" value="${escapeHtml(consentTicket)}">`
       : '';
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
 
     // Get translation function from request (set by i18n middleware)
     const t = (req as any).t || ((key: string) => key);
@@ -518,7 +541,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       state: state || undefined,
       codeChallenge: code_challenge || undefined,
       codeChallengeMethod: code_challenge_method || undefined,
-      token: requestToken || undefined,
+      consentTicket: consentTicket || undefined,
       resource: await resolveResourceTarget(resource),
       client: consentClientInfo,
     };

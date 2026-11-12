@@ -17,10 +17,7 @@ jest.mock('../../src/services/mcpService.js', () => ({
   addServer: jest.fn(),
 }));
 
-import {
-  exportTemplate,
-  exportGroupTemplate,
-} from '../../src/services/templateService.js';
+import { exportTemplate, exportGroupTemplate } from '../../src/services/templateService.js';
 
 const alice = { username: 'alice', isAdmin: false };
 const admin = { username: 'admin', isAdmin: true };
@@ -33,7 +30,10 @@ const servers = [
     owner: 'bob',
     visibility: 'public',
     enabled: true,
-    url: 'http://c',
+    type: 'streamable-http',
+    url: 'https://mcp.vendor.example/mcp?api_key=sk_live_url',
+    headers: { 'X-API-Key': 'sk_live_header' },
+    env: { DATABASE_URL: 'postgres://u:pass@db/x' },
   },
 ];
 
@@ -80,14 +80,26 @@ describe('template export ownership filtering (GHSA-p589)', () => {
     expect(Object.keys(tpl.servers).sort()).toEqual(['alice-private', 'bob-public']);
   });
 
+  it('non-admin export of a shared server omits its connection config (issue #1036)', async () => {
+    const tpl = await exportTemplate({ name: 't', requestingUser: alice });
+    const exported = JSON.stringify(tpl);
+    expect(tpl.servers['bob-public']).toEqual({ type: 'streamable-http', enabled: true });
+    expect(exported).not.toContain('sk_live_url');
+    expect(exported).not.toContain('sk_live_header');
+    expect(exported).not.toContain('pass@db');
+    // Owned servers keep their full (secret-stripped) config.
+    expect(tpl.servers['alice-private'].url).toBe('http://a');
+  });
+
+  it('owner/admin export redacts API-key headers', async () => {
+    const tpl = await exportTemplate({ name: 't', requestingUser: admin });
+    expect(tpl.servers['bob-public'].headers?.['X-API-Key']).not.toBe('sk_live_header');
+  });
+
   it('admin full export still sees everything', async () => {
     const tpl = await exportTemplate({ name: 't', requestingUser: admin });
     expect(tpl.groups.map((g) => g.name).sort()).toEqual(['AliceG', 'BobG', 'MixedG']);
-    expect(Object.keys(tpl.servers).sort()).toEqual([
-      'alice-private',
-      'bob-private',
-      'bob-public',
-    ]);
+    expect(Object.keys(tpl.servers).sort()).toEqual(['alice-private', 'bob-private', 'bob-public']);
   });
 
   it('no requestingUser keeps the legacy unfiltered behavior (system callers)', async () => {

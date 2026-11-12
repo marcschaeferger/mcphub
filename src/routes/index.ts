@@ -109,6 +109,7 @@ import {
 } from '../controllers/discoveryController.js';
 import { login, register, getCurrentUser, changePassword } from '../controllers/authController.js';
 import { getAllLogs, clearLogs, streamLogs } from '../controllers/logController.js';
+import { createUrlTicket } from '../controllers/urlTicketController.js';
 import {
   getRuntimeConfig,
   getPublicConfig,
@@ -203,6 +204,7 @@ import {
   authenticatedRouteRateLimiter,
   hostedInternalEventRateLimiter,
   mcpConnectionRateLimiter,
+  oauthClientRegistrationRateLimiter,
   templateRateLimiter,
 } from '../utils/rateLimit.js';
 
@@ -272,7 +274,12 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   ); // Public protected resource metadata
 
   // RFC 7591 Dynamic Client Registration endpoints (public for registration)
-  app.post('/oauth/register', mcpConnectionRateLimiter, registerClient); // Register new OAuth client
+  app.post(
+    '/oauth/register',
+    mcpConnectionRateLimiter,
+    oauthClientRegistrationRateLimiter,
+    registerClient,
+  ); // Register new OAuth client
   app.get('/oauth/register/:clientId', mcpConnectionRateLimiter, getClientConfiguration); // Read client configuration
   app.put('/oauth/register/:clientId', mcpConnectionRateLimiter, updateClientConfiguration); // Update client configuration
   app.delete('/oauth/register/:clientId', mcpConnectionRateLimiter, deleteClientRegistration); // Delete client registration
@@ -478,8 +485,18 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   authenticatedRouter.get('/cloud/categories/:category', getCloudServersByCategory);
   authenticatedRouter.get('/cloud/tags', getAllCloudTags);
   authenticatedRouter.get('/cloud/tags/:tag', getCloudServersByTag);
-  authenticatedRouter.get('/cloud/servers/:serverName/tools', getCloudServerToolsList);
-  authenticatedRouter.post('/cloud/servers/:serverName/tools/:toolName/call', callCloudTool);
+  // Listing and calling cloud tools spends the operator's MCPRouter API key and
+  // bypasses server visibility/sharing, so only admins may use them.
+  authenticatedRouter.get(
+    '/cloud/servers/:serverName/tools',
+    requireAdminMiddleware,
+    getCloudServerToolsList,
+  );
+  authenticatedRouter.post(
+    '/cloud/servers/:serverName/tools/:toolName/call',
+    requireAdminMiddleware,
+    callCloudTool,
+  );
 
   // Registry routes (proxy to official MCP registry)
   authenticatedRouter.get('/registry/servers', getAllRegistryServers);
@@ -493,6 +510,8 @@ export const initRoutes = async (app: express.Application): Promise<void> => {
   authenticatedRouter.get('/logs', getAllLogs);
   authenticatedRouter.delete('/logs', clearLogs);
   authenticatedRouter.get('/logs/stream', streamLogs);
+  // Short-lived, purpose-bound tickets for URLs (log stream, OAuth consent).
+  authenticatedRouter.post('/url-tickets', createUrlTicket);
 
   // MCP settings export route
   authenticatedRouter.get('/mcp-settings/export', getMcpSettingsJson);

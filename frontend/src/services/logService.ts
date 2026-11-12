@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { apiGet, apiDelete } from '../utils/fetchInterceptor';
+import { apiGet, apiDelete, apiPost } from '../utils/fetchInterceptor';
 import { getApiUrl } from '../utils/runtime';
-import { getToken } from '../utils/interceptors';
 
 export interface LogEntry {
   timestamp: number;
@@ -51,6 +50,9 @@ class LogStreamManager {
   private subscribers = new Set<(event: MessageEvent) => void>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private openAttempts = 0;
+  // Bumped on every open/close so a ticket request that resolves after the
+  // stream was closed (or reopened) does not open a stale EventSource.
+  private generation = 0;
 
   /** Subscribe to incoming SSE messages.  Returns an unsubscribe callback. */
   subscribe(callback: (event: MessageEvent) => void): () => void {
@@ -70,16 +72,35 @@ class LogStreamManager {
 
   private openEventSource() {
     this.closeEventSource();
-    const token = getToken();
+    const generation = this.generation;
 
-    if (!token) {
-      console.warn('[LogStreamManager] No token available, scheduling reconnect...');
-      this.scheduleReconnect();
-      return;
-    }
+    // EventSource cannot send headers, and the session JWT must not go into the
+    // URL (proxy logs, history). Exchange it for a short-lived stream ticket.
+    void apiPost<{ success: boolean; data?: { ticket?: string } }>('/url-tickets', {
+      purpose: 'log-stream',
+    })
+      .then((result) => {
+        if (generation !== this.generation || this.subscribers.size === 0) return;
+        const ticket = result?.success ? result.data?.ticket : undefined;
+        if (!ticket) {
+          console.warn('[LogStreamManager] No stream ticket available, scheduling reconnect...');
+          this.scheduleReconnect();
+          return;
+        }
+        this.connect(ticket);
+      })
+      .catch((error) => {
+        if (generation !== this.generation) return;
+        console.error('[LogStreamManager] Failed to obtain stream ticket:', error);
+        if (this.subscribers.size > 0) {
+          this.scheduleReconnect();
+        }
+      });
+  }
 
+  private connect(ticket: string) {
     try {
-      const url = getApiUrl(`/logs/stream?token=${token}`);
+      const url = getApiUrl(`/logs/stream?ticket=${encodeURIComponent(ticket)}`);
 
       let redactedUrl = url;
       try {
@@ -124,6 +145,7 @@ class LogStreamManager {
   }
 
   private closeEventSource() {
+    this.generation += 1;
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;

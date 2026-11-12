@@ -141,9 +141,13 @@ export const initializeDefaultUser = async (): Promise<void> => {
       return;
     }
 
-    if (process.env.NODE_ENV === 'development') {
+    // The well-known admin123 password is only for `pnpm dev`: scripts/dev-backend.js
+    // sets MCPHUB_DEV_DEFAULT_ADMIN=1. NODE_ENV=development alone (e.g. from a
+    // copied .env.example on a source install) must not provision it.
+    if (process.env.NODE_ENV === 'development' && process.env.MCPHUB_DEV_DEFAULT_ADMIN === '1') {
       await createDefaultAdmin('admin123');
       logger.log('Using development admin password: admin123');
+      logger.log('WARNING: admin/admin123 is for local development only. Never expose it.');
       return;
     }
 

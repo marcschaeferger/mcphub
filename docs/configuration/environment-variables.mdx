@@ -27,6 +27,10 @@ MCPHub reads the following environment variables at startup. The authoritative l
 | `ENABLE_METRICS` | `false` | Enable the root `/metrics` Prometheus endpoint. |
 | `METRICS_TOKEN` | unset | Dedicated bearer token for metrics scraping. Without it, an enabled endpoint is public; restrict network access. |
 | `DEBUG` | `false` | Set to `true` to enable verbose startup logging for frontend-path discovery. |
+| `OPENAPI_MAX_SCHEMA_NODES` | `2000000` | Maximum number of JSON values generated for the tool input schemas of one OpenAPI spec. Specs whose shared `$ref`s expand beyond it fail to load instead of blocking the hub. |
+| `OPENAPI_MAX_RESPONSE_BYTES` | `52428800` (50 MB) | Maximum size of an OpenAPI spec download, external `$ref` document or OpenAPI tool response. Larger bodies are aborted instead of buffered. |
+| `MCPHUB_OAUTH_MAX_DYNAMIC_CLIENTS` | `1000` | Maximum number of stored OAuth clients created by dynamic client registration (`POST /oauth/register`). Further registrations get `503` until idle clients are reaped. `0` disables the cap. |
+| `OAUTH_REGISTER_RATE_LIMIT_MAX` | `60` | Dynamic client registrations allowed per IP per `OAUTH_REGISTER_RATE_LIMIT_WINDOW_MS` (default 15 minutes). |
 
 
 ### Custom Smart Routing URL
@@ -40,6 +44,7 @@ The configured segment is reserved for Smart Routing. Startup rejects existing s
 | Variable | Default | Description |
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | random (`admin123` in `pnpm dev`) | Password seeded for the bootstrap `admin` user when no users exist yet. If unset, `pnpm dev` uses `admin123`; other starts generate a 24-character random password and print it to the logs. |
+| `MCPHUB_ALLOW_QUERY_TOKEN` | `false` | Accept the dashboard JWT from a `?token=` query parameter on `/api`, `/oauth/authorize` and the user-scoped MCP/SSE endpoints (legacy). Off by default because URLs end up in proxy logs and browser history. |
 | `JWT_SECRET` | random per-process | Secret used to sign JWTs issued by `/api/auth/login`. See the warning below — this **must** be set explicitly in any non-development deployment. |
 
 <Warning>
@@ -81,6 +86,7 @@ Provider client credentials remain environment-variable only.
 | `BETTER_AUTH_OIDC_PKCE` | Enable or disable PKCE for the local OIDC provider. Defaults to `true`. |
 | `BETTER_AUTH_OIDC_PROMPT` | Optional `prompt` parameter for the local OIDC provider (`login`, `consent`, `select_account`, etc.). |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Client credentials for a local OIDC provider such as Keycloak, Authentik, or Dex. |
+| `MCPHUB_SSO_ALLOW_UNVERIFIED_EMAIL_LINK` | An SSO login adopts an existing MCPHub account by email or username only when the IdP marks the email as verified (or the OIDC provider has `trustEmail`). Logins that would match an existing account otherwise are refused. Set to `true` to restore the old unverified linking for IdPs that omit `email_verified`. Defaults to `false`. |
 
 You can still store the non-secret Better Auth settings in `systemConfig.auth.betterAuth`, but `BETTER_AUTH_*` variables now override those values at startup. A full env-only local OIDC example looks like this:
 

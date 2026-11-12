@@ -17,6 +17,7 @@ import { validateServerName } from '../utils/serverNameValidation.js';
 import { createGroup } from './groupService.js';
 import { addServer } from './mcpService.js';
 import { getDataService } from './services.js';
+import { authorizationService } from './authorizationService.js';
 import type { IUser } from '../types/index.js';
 
 const TEMPLATE_VERSION = '1.0';
@@ -137,7 +138,16 @@ function stripHeaderSecrets(headers: Record<string, string>): {
 
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
-    if (lower === 'authorization' || lower.includes('token') || lower.includes('auth')) {
+    if (
+      lower === 'authorization' ||
+      lower.includes('token') ||
+      lower.includes('auth') ||
+      lower.includes('key') ||
+      lower.includes('secret') ||
+      lower.includes('password') ||
+      lower.includes('cookie') ||
+      lower.includes('session')
+    ) {
       const placeholder = toPlaceholderName(key, 'HEADER_SECRET');
       const { sanitizedValue, placeholder: placeholderName } = sanitizeSecretValue(
         value,
@@ -349,6 +359,21 @@ function stripOpenApiSecuritySecrets(
 }
 
 /**
+ * Metadata-only view of a server for principals without 'server.config.read';
+ * mirrors the allowlist in serverConfigPresenter.
+ */
+function toConfigRestrictedServer(config: ServerConfig): ServerConfig {
+  const restricted: ServerConfig = {};
+  if (config.type) restricted.type = config.type;
+  if (config.description) restricted.description = config.description;
+  if (config.enabled !== undefined) restricted.enabled = config.enabled;
+  if (config.tools) restricted.tools = config.tools;
+  if (config.prompts) restricted.prompts = config.prompts;
+  if (config.resources) restricted.resources = config.resources;
+  return restricted;
+}
+
+/**
  * Convert a full ServerConfig to a TemplateServerConfig with secrets stripped.
  */
 function serverConfigToTemplate(config: ServerConfig): {
@@ -488,7 +513,15 @@ export async function exportTemplate(options: TemplateExportOptions): Promise<Co
     if (!referencedServerNames.has(server.name)) continue;
     if (!options.includeDisabledServers && server.enabled === false) continue;
 
-    const { templateConfig, envVars } = serverConfigToTemplate(server);
+    // Visibility (public/group sharing) lets a user discover and invoke a server,
+    // not read its connection config (issue #1036). Exporting it must not leak
+    // url, args, env, headers, oauth or openapi to shared users either.
+    const exportable =
+      options.requestingUser &&
+      !authorizationService.can('server.config.read', server, options.requestingUser)
+        ? toConfigRestrictedServer(server)
+        : server;
+    const { templateConfig, envVars } = serverConfigToTemplate(exportable);
     templateServers[server.name] = templateConfig;
     includedServerNames.add(server.name);
     allEnvVars.push(...envVars);

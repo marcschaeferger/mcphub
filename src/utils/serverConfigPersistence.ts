@@ -240,9 +240,11 @@ export const normalizeOAuth = (
     normalized.dynamicRegistration = oauth.dynamicRegistration;
   }
 
-  if (oauth.pendingAuthorization) {
-    normalized.pendingAuthorization = oauth.pendingAuthorization;
-  }
+  // pendingAuthorization is runtime OAuth state (authorization URL, state, PKCE
+  // verifier, cached discovery metadata). Only the OAuth provider/settings store
+  // may write it; accepting it from API input let any server owner inject e.g. a
+  // javascript: authorizationUrl that the dashboard opens for admins (stored
+  // XSS). Update paths carry the stored value over themselves.
 
   // Match dashboard saves and empty OAuth configs so legacy default labels do
   // not appear to change the connection or discard bindings during a rename.
@@ -338,7 +340,7 @@ export const normalizeServerConfigForPersistence = (config: ServerConfig): Serve
     (!['sse', 'streamable-http'].includes(normalizedType || '') ||
       oauth.accessToken ||
       oauth.refreshToken ||
-      oauth.pendingAuthorization ||
+      config.oauth?.pendingAuthorization ||
       config.credentialTemplate?.length)
   ) {
     throw new ServerConfigValidationError(

@@ -5,6 +5,7 @@ const createOAuthClientMock = jest.fn();
 const findOAuthClientByIdMock = jest.fn();
 const updateOAuthClientMock = jest.fn();
 const deleteOAuthClientMock = jest.fn();
+const getOAuthClientsMock = jest.fn();
 
 jest.mock('../../src/dao/DaoFactory.js', () => ({
   getSystemConfigDao: jest.fn(() => ({
@@ -17,6 +18,7 @@ jest.mock('../../src/models/OAuth.js', () => ({
   findOAuthClientById: findOAuthClientByIdMock,
   updateOAuthClient: updateOAuthClientMock,
   deleteOAuthClient: deleteOAuthClientMock,
+  getOAuthClients: getOAuthClientsMock,
   createRegistrationToken: jest.fn(() => 'test-registration-token'),
   verifyRegistrationToken: jest.fn(() => 'test-client'),
   deleteRegistrationToken: jest.fn(),
@@ -74,6 +76,7 @@ describe('oauthDynamicRegistrationController - registerClient', () => {
     });
 
     createOAuthClientMock.mockImplementation(async (client) => client);
+    getOAuthClientsMock.mockResolvedValue([]);
   });
 
   it('uses DAO-backed oauthServer and install settings when registering clients', async () => {
@@ -100,6 +103,65 @@ describe('oauthDynamicRegistrationController - registerClient', () => {
         ),
       }),
     );
+  });
+
+  describe('metadata bounds (storage DoS)', () => {
+    afterEach(() => {
+      delete process.env.MCPHUB_OAUTH_MAX_DYNAMIC_CLIENTS;
+    });
+
+    it.each([
+      ['an oversized client_name', { client_name: 'x'.repeat(201) }],
+      ['a non-string client_name', { client_name: { nested: true } }],
+      ['too many contacts', { contacts: Array.from({ length: 11 }, (_, i) => `a${i}@x.test`) }],
+      ['an oversized jwks', { jwks: { keys: [{ k: 'x'.repeat(20 * 1024) }] } }],
+      ['an oversized logo_uri', { logo_uri: `https://x.test/${'a'.repeat(2100)}` }],
+      ['an unknown token_endpoint_auth_method', { token_endpoint_auth_method: 'private_key_jwt2' }],
+      ['an unknown application_type', { application_type: 'x'.repeat(50) }],
+      [
+        'too many redirect_uris',
+        { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://c.test/${i}`) },
+      ],
+      ['a custom scheme on localhost', { redirect_uris: ['foo://localhost/cb'] }],
+    ])('rejects %s without persisting a client', async (_label, overrides) => {
+      mockRequest.body = { ...mockRequest.body, ...overrides };
+
+      await registerClient(mockRequest as Request, mockResponse as Response);
+
+      expect(mockStatus).toHaveBeenCalledWith(400);
+      expect(createOAuthClientMock).not.toHaveBeenCalled();
+    });
+
+    it('still accepts loopback http redirect URIs for native clients', async () => {
+      mockRequest.body = { ...mockRequest.body, redirect_uris: ['http://127.0.0.1:33418/cb'] };
+
+      await registerClient(mockRequest as Request, mockResponse as Response);
+
+      expect(mockStatus).toHaveBeenCalledWith(201);
+    });
+
+    it('does not persist unknown metadata fields', async () => {
+      mockRequest.body = { ...mockRequest.body, junk: 'y'.repeat(1000) };
+
+      await registerClient(mockRequest as Request, mockResponse as Response);
+
+      expect(mockStatus).toHaveBeenCalledWith(201);
+      expect(JSON.stringify(createOAuthClientMock.mock.calls[0][0])).not.toContain('yyyy');
+    });
+
+    it('refuses new registrations once the dynamic client cap is reached', async () => {
+      process.env.MCPHUB_OAUTH_MAX_DYNAMIC_CLIENTS = '2';
+      getOAuthClientsMock.mockResolvedValue([
+        { clientId: 'a', owner: 'dynamic-registration' },
+        { clientId: 'b', owner: 'dynamic-registration' },
+        { clientId: 'c', owner: 'admin' },
+      ]);
+
+      await registerClient(mockRequest as Request, mockResponse as Response);
+
+      expect(mockStatus).toHaveBeenCalledWith(503);
+      expect(createOAuthClientMock).not.toHaveBeenCalled();
+    });
   });
 });
 

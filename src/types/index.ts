@@ -384,6 +384,7 @@ export interface IOAuthAuthorizationCode {
   scope?: string; // Granted scopes
   clientId: string; // Client ID
   approvalId?: string; // Revocable consent grant associated with this authorization
+  resource?: string; // RFC 8707 resource approved for this authorization ('' = none requested)
   sessionVersion?: string; // Credential version at authorization
   username: string; // User who authorized
   codeChallenge?: string; // PKCE code challenge
@@ -399,6 +400,9 @@ export interface IOAuthToken {
   scope?: string; // Granted scopes
   clientId: string; // Client ID
   approvalId?: string; // Preserved through refresh-token rotation
+  // RFC 8707 audience the token is bound to ('' = no resource requested, i.e. the
+  // aggregate endpoint). Undefined only for legacy tokens issued before binding.
+  resource?: string;
   sessionVersion?: string; // Credential version at issuance
   username: string; // Username
 }

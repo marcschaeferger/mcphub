@@ -30,3 +30,27 @@ it('preserves the credential version through database token writes and reads', a
   );
   expect(await dao.findByAccessToken(token.accessToken)).toEqual(token);
 });
+
+it('persists the RFC 8707 resource and keeps legacy NULL distinct from an unbound grant', async () => {
+  const base = {
+    accessToken: 'bound',
+    accessTokenExpiresAt: new Date(Date.now() + 3600000),
+    clientId: 'client',
+    username: 'alice',
+  };
+  const dao = new OAuthTokenDaoDbImpl();
+
+  mockRepository.create.mockResolvedValue({ ...base, resource: 'https://hub.example/mcp/a' });
+  await dao.create({ ...base, resource: 'https://hub.example/mcp/a' });
+  expect(mockRepository.create).toHaveBeenLastCalledWith(
+    expect.objectContaining({ resource: 'https://hub.example/mcp/a' }),
+  );
+
+  mockRepository.findByAccessToken.mockResolvedValue({ ...base, resource: '' });
+  expect((await dao.findByAccessToken('bound'))?.resource).toBe('');
+
+  mockRepository.findByAccessToken.mockResolvedValue({ ...base, resource: null });
+  const legacy = await dao.findByAccessToken('bound');
+  expect(legacy).not.toBeNull();
+  expect(legacy!.resource).toBeUndefined();
+});

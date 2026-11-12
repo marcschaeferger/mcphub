@@ -16,19 +16,32 @@ export const getPublicInstallBaseUrl = (
   return resolveInstallBaseUrl(systemConfig, host ? `${protocol}://${host}` : undefined);
 };
 
-export const getPublicResourceUrl = (req: Request, systemConfig?: SystemConfig | null): string => {
-  const baseUrl = getPublicInstallBaseUrl(req, systemConfig)!;
-  const path = (req.originalUrl || req.path || '/').split('?')[0];
+/**
+ * Public URL of the MCP transport root: origin plus the deployment prefix
+ * (the install URL path when one is configured, else BASE_PATH), without a
+ * trailing slash. Every resource URI this hub serves starts with it. Empty
+ * when neither an install URL nor the request's host is known: no absolute
+ * resource then lies under it.
+ */
+export const getPublicResourceBase = (req: Request, systemConfig?: SystemConfig | null): string => {
+  const baseUrl = getPublicInstallBaseUrl(req, systemConfig);
+  if (!baseUrl) return '';
   const basePath = (config.basePath || '').replace(/\/+$/, '');
-  const resourcePath =
-    basePath && path.startsWith(`${basePath}/`) ? path.slice(basePath.length) : path;
   const publicBase = new URL(baseUrl);
   // Without a configured public URL, the request already contains the deployment prefix.
   const prefix =
     systemConfig?.install?.baseUrl?.trim() || process.env.INSTALL_BASE_URL?.trim()
       ? publicBase.pathname.replace(/\/+$/, '')
       : basePath;
-  return `${publicBase.origin}${prefix}${resourcePath}`;
+  return `${publicBase.origin}${prefix}`;
+};
+
+export const getPublicResourceUrl = (req: Request, systemConfig?: SystemConfig | null): string => {
+  const path = (req.originalUrl || req.path || '/').split('?')[0];
+  const basePath = (config.basePath || '').replace(/\/+$/, '');
+  const resourcePath =
+    basePath && path.startsWith(`${basePath}/`) ? path.slice(basePath.length) : path;
+  return `${getPublicResourceBase(req, systemConfig)}${resourcePath}`;
 };
 
 export const getResourceMetadataUrl = (resource: string): string => {

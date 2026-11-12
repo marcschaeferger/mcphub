@@ -94,6 +94,12 @@ export async function rememberApproval(
   return approval.id;
 }
 
+/** The RFC 8707 resource the user approved for a grant ('' = none requested). */
+export async function getApprovalResource(approvalId?: string): Promise<string | undefined> {
+  if (!approvalId) return undefined;
+  return (await getOAuthApprovalDao().findById(approvalId))?.resource;
+}
+
 // Expiration controls future silent consent only. Deletion revokes the grant,
 // including tokens saved concurrently with revocation on another replica.
 export async function isApprovalGrantValid(user: ApprovalUser, clientId: string): Promise<boolean> {

@@ -1,8 +1,11 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
+  getApprovalResource,
   isApprovalGrantValid,
   rememberApproval,
   resolveConsentScopes,
 } from './oauthApprovalService.js';
+import { InvalidTargetError, resolveTokenResource } from './oauthResourceBinding.js';
 import { getUserSessionVersion, resolveUserSession } from '../utils/userSession.js';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import { Request as ExpressRequest, Response as ExpressResponse } from 'express';
@@ -22,9 +25,43 @@ import { safeCompare } from '../utils/safeCompare.js';
 import { cloneDefaultOAuthServerConfig } from '../constants/oauthServerDefaults.js';
 import { findOAuthClientIncludingCimd, resolveCimdClient } from './cimdClientService.js';
 import { logger } from '../utils/logger.js';
+import { getPublicResourceBase } from '../utils/protectedResource.js';
 import type { SystemConfig } from '../types/index.js';
 
 const { Request, Response } = OAuth2Server;
+
+// The model API has no access to the token request, so the RFC 8707 `resource`
+// parameter of the current token request is carried here.
+// `resourceBase` is the hub's public resource base for that request.
+const tokenRequestContext = new AsyncLocalStorage<{ resource?: unknown; resourceBase: string }>();
+
+/**
+ * Resolve the audience for a token about to be issued from `granted` (the
+ * approved resource) and the token request's `resource` parameter. Runs before
+ * the code or refresh token is consumed, so a bad parameter does not burn it.
+ */
+const resolveIssuedResource = async (
+  granted: string | undefined,
+  username: string,
+  preferred?: string,
+): Promise<string> => {
+  const context = tokenRequestContext.getStore();
+  try {
+    if (!context) throw new InvalidTargetError('No token request context');
+    return await resolveTokenResource(
+      granted,
+      context.resource,
+      username,
+      context.resourceBase,
+      preferred,
+    );
+  } catch (error) {
+    if (error instanceof InvalidTargetError) {
+      throw new OAuth2Server.OAuthError(error.message, { code: 400, name: 'invalid_target' });
+    }
+    throw error;
+  }
+};
 
 // OAuth2Server model implementation
 const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshTokenModel = {
@@ -130,6 +167,8 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: user.username,
         sessionVersion,
         approvalId,
+        // The audience the user approved travels with the code into the token.
+        resource: await getApprovalResource(approvalId),
         codeChallenge: code.codeChallenge,
         codeChallengeMethod: code.codeChallengeMethod,
       },
@@ -186,6 +225,7 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: code.username,
         sessionVersion: code.sessionVersion,
         approvalId: code.approvalId,
+        resource: await resolveIssuedResource(code.resource, code.username),
       },
       codeChallenge: code.codeChallenge,
       codeChallengeMethod: code.codeChallengeMethod,
@@ -229,6 +269,8 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: user.username,
         sessionVersion: user.sessionVersion,
         approvalId: user.approvalId,
+        // Set by getAuthorizationCode/getRefreshToken (always bound).
+        resource: user.resource,
       },
       accessTokenLifetime,
       refreshTokenLifetime,
@@ -300,6 +342,15 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
 
     const scopeArray = token.scope ? token.scope.split(' ') : undefined;
 
+    // The approval's resource is the ceiling (else the token's own, else every
+    // route). Without a `resource` parameter the new token keeps the refreshed
+    // token's own audience, so a downscoped token stays downscoped; a legacy
+    // token (no stored resource) gets the ceiling. The successor of a legacy
+    // grant is therefore always bound: legacy tokens are accepted unbound only
+    // until they expire and never renew that state.
+    const approvedResource = await getApprovalResource(token.approvalId);
+    const grantedResource = approvedResource ?? token.resource;
+
     return {
       refreshToken: token.refreshToken!,
       refreshTokenExpiresAt: token.refreshTokenExpiresAt!,
@@ -315,6 +366,7 @@ const oauthModel: OAuth2Server.AuthorizationCodeModel & OAuth2Server.RefreshToke
         username: token.username,
         sessionVersion: token.sessionVersion,
         approvalId: token.approvalId,
+        resource: await resolveIssuedResource(grantedResource, token.username, token.resource),
       },
     };
   },
@@ -493,7 +545,10 @@ export const handleTokenRequest = async (
   const request = new Request(req);
   const response = new Response(res);
 
-  return await oauth.token(request, response);
+  const resourceBase = getPublicResourceBase(req, await getSystemConfigDao().get());
+  return await tokenRequestContext.run({ resource: req.body?.resource, resourceBase }, () =>
+    oauth!.token(request, response),
+  );
 };
 
 /**

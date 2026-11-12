@@ -2104,7 +2104,8 @@ test('consumer OAuth reports missing personal authorization and recovers after s
   });
   await initializeClientsFromSettings(true);
   const verifier = 'v'.repeat(64);
-  const authorized = await request(app)
+  // Authorize on the server the MCP client uses: the resource must name it.
+  const authorized = await request(baseUrl)
     .post('/oauth/authorize')
     .send({
       allow: 'true',
@@ -2121,7 +2122,7 @@ test('consumer OAuth reports missing personal authorization and recovers after s
   expect(authorized.status).toBe(302);
   const consumerCallback = new URL(authorized.headers.location);
   expect(consumerCallback.searchParams.get('state')).toBe('consumer-state');
-  const exchange = await request(app)
+  const exchange = await request(baseUrl)
     .post('/oauth/token')
     .type('form')
     .send({

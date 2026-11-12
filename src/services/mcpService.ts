@@ -6597,7 +6597,7 @@ const getGroupServerConfig = async (
     return undefined;
   }
 
-  return serverConfig ?? getServerConfigInGroup(group, serverName);
+  return serverConfig ?? getServerConfigInGroup(group, serverName, { routeReference: true });
 };
 
 // Filter tools based on group configuration

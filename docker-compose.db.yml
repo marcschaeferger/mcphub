@@ -28,9 +28,11 @@ services:
   mcphub:
     image: samanhappy/mcphub:latest
     container_name: mcphub
-    # MCPHub drops to uid 10001 after start; root-owned /app/data volumes from
-    # older images are handed over automatically. Set MCPHUB_RUN_AS_ROOT: "true"
-    # to keep the previous root behaviour.
+    # MCPHub runs as uid 10001. Data written by older images (which ran as
+    # root) is root-owned: hand it over once, then start the stack again:
+    #   docker compose -f docker-compose.db.yml run --rm --user 0:0 mcphub mcphub-migrate
+    # Do not add `user: "0:0"` to keep root; see "Upgrading from root images"
+    # in docs/configuration/docker-setup.mdx.
     environment:
       # Database connection (setting DB_URL automatically enables database mode)
       DB_URL: "postgresql://mcphub:${DB_PASSWORD:?set DB_PASSWORD}@postgres:5432/mcphub"

@@ -74,7 +74,7 @@ docker compose up -d --force-recreate proxy
 
 ## Kubernetes 部署
 
-[`examples/kubernetes/replicas/`](https://github.com/samanhappy/mcphub/tree/main/examples/kubernetes/replicas) 提供独立建库 Job、双副本 Deployment、共享 ConfigMap、Service/Ingress 和 PodDisruptionBudget。默认使用官方 `samanhappy/mcphub:latest` 镜像；生产部署前，将 `setup-job.yaml` 和 `deployment.yaml` **两处镜像**固定为同一版本或 digest。
+[`examples/kubernetes/replicas/`](https://github.com/samanhappy/mcphub/tree/main/examples/kubernetes/replicas) 提供独立建库 Job、双副本 Deployment、共享 ConfigMap、Service/Ingress 和 PodDisruptionBudget。默认使用官方 `samanhappy/mcphub:latest` 镜像；生产部署前，将 `setup-job.yaml` 和 `deployment.yaml` **两处镜像**固定为同一版本或 digest。两者都以 uid `10001` 运行（`runAsNonRoot`、`fsGroup: 10001`、`fsGroupChangePolicy: OnRootMismatch`），与镜像默认用户一致。
 
 先准备可访问且支持 pgvector 的 PostgreSQL，并为建库任务提供相应权限；数据库部署和备份不包含在清单中。对外暴露示例 Ingress 还需已有 Traefik 控制器、`websecure` 入口、DNS，以及 `mcphub` 命名空间中的 `mcphub-tls` TLS Secret。建库前，将 `configmap.yaml` 和 `service.yaml` 中的 `mcphub.example.com` 改为实际对外域名。只读初始配置不包含服务器，默认关闭 OAuth；建库后通过管理界面/API 管理共享配置。
 

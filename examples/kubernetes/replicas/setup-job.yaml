@@ -12,6 +12,12 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: setup
           image: samanhappy/mcphub:latest

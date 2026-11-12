@@ -296,6 +296,26 @@ description: '各种平台的详细安装说明'
           labels:
             app: mcphub
         spec:
+          securityContext:
+            # 镜像以 uid 10001 运行；fsGroup 让卷对该用户可写，
+            # OnRootMismatch 在属主已正确时跳过递归修改。
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+          initContainers:
+          # ConfigMap 是只读的，而 MCPHub 需要在设置文件旁写入附属文件，
+          # 因此先复制到可写卷中。
+          - name: prepare-config
+            image: busybox:1.28
+            command: ["sh", "-c", "cp /config-ro/mcp_settings.json /etc/mcphub/mcp_settings.json"]
+            volumeMounts:
+            - name: config
+              mountPath: /config-ro
+              readOnly: true
+            - name: app-storage
+              mountPath: /etc/mcphub
           containers:
           - name: mcphub
             image: samanhappy/mcphub:latest
@@ -304,14 +324,17 @@ description: '各种平台的详细安装说明'
             env:
             - name: PORT
               value: "3000"
+            - name: MCPHUB_SETTING_PATH
+              value: /etc/mcphub/mcp_settings.json
             volumeMounts:
-            - name: config
-              mountPath: /app/mcp_settings.json
-              subPath: mcp_settings.json
+            - name: app-storage
+              mountPath: /etc/mcphub
           volumes:
           - name: config
             configMap:
               name: mcphub-config
+          - name: app-storage
+            emptyDir: {}
     ```
 
     #### 3. 服务

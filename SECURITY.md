@@ -13,7 +13,7 @@ This fork carries security changes that are not yet upstream:
 | Area | Change |
 | --- | --- |
 | Dependencies | MCP SDK 2.4.0 with a rebased client patch; `pnpm.overrides` pin transitive dependencies to fixed versions |
-| Docker image | Multi-stage build, digest-pinned bases, app runs as uid 10001, tini, HEALTHCHECK, no compiler toolchain |
+| Docker image | Multi-stage build, digest-pinned bases, runs as uid 10001 from the first process (no root, no runtime chown or user switch; the full variant alone runs as root for Docker-in-Docker), tini, HEALTHCHECK, no compiler toolchain. Volumes from earlier root images are handed over once with the explicit `mcphub-migrate` command |
 | Docker image (Wolfi) | Optional `Dockerfile.wolfi` variant on a digest-pinned Wolfi base (weekly Renovate bump) with the same user, entrypoint and pins, published as `*-wolfi` tags |
 | Image release | Every variant is Trivy-gated (debian and wolfi also smoke-tested) before push, and the pushed amd64 and arm64 images are scanned again before any tag points at them; images ship with an SBOM and max-mode provenance and every pushed digest is signed keyless with cosign, see [Verifying images](#verifying-images) |
 | Source | SSO account linking, OAuth registration limits, XSS in OAuth URLs, OpenAPI DoS limits, admin-only cloud tools, session token kept out of URLs |

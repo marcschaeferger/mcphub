@@ -18,6 +18,14 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
+      # The image runs as uid 10001. fsGroup hands mounted volumes to that
+      # group; OnRootMismatch skips the recursive change once it is done.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

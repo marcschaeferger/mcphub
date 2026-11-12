@@ -51,11 +51,11 @@ docker run -d \
 
 ### 构建扩展功能版本
 
-Docker 镜像支持 `INSTALL_EXT` 构建参数以包含额外工具。发布的 `-full` 镜像会启用此参数：
+Docker 镜像支持 `INSTALL_EXT` 构建参数以包含额外工具。发布的 `-full` 镜像会启用此参数。Docker 守护进程需要 root，因此构建 full 版本时还需要 `--build-arg RUN_AS=0:0`；缺少该参数时，构建会在大量下载之前报错停止：
 
 ```bash
 # 构建扩展功能版本（包含稳定版 Rust/Cargo、Docker 引擎，以及供 Playwright 使用的 Chrome 和 Firefox）
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # 方式 1: 使用自动 Docker-in-Docker（需要特权模式）
 docker run -d \
@@ -121,8 +121,8 @@ services:
       - ./data:/app/data
       # 让已安装的 stdio 服务器包在容器重建后依然保留。
       # 参见下方"持久化 stdio 包缓存"。
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
     depends_on:
       postgres:
         condition: service_healthy
@@ -164,17 +164,19 @@ networks:
 ### 持久化 stdio 包缓存
 
 `stdio` 服务器在首次使用时会下载并安装对应的包：`npx` 使用 npm 的缓存，`uvx` 以及其他基于
-`uv` 的命令使用 uv 的缓存。镜像未设置 `USER`，因此以 `root` 运行，这些安装内容位于：
+`uv` 的命令使用 uv 的缓存。MCPHub 以 `HOME=/home/mcphub` 运行（以 root 运行的 `full` 镜像也是如此），
+这些安装内容位于：
 
 | 路径 | 存放内容 |
 | --- | --- |
-| `/root/.npm/_npx` | `npx` 安装的包 |
-| `/root/.npm/_cacache` | npm 下载的 tarball |
-| `/root/.cache/uv` | uv 的下载缓存，以及 `uvx` 创建的环境 |
+| `/home/mcphub/.npm/_npx` | `npx` 安装的包 |
+| `/home/mcphub/.npm/_cacache` | npm 下载的 tarball |
+| `/home/mcphub/.cache/uv` | uv 的下载缓存，以及 `uvx` 创建的环境 |
 
 `uv tool install` 创建的环境位于 `~/.local/share/uv/tools`，它们烘焙在镜像层中，不受这里的
-讨论影响。如果你以非 root 用户运行镜像，`~` 就不是 `/root`：上表中的路径与下文的挂载目标都需
-要改成该用户的家目录。
+讨论影响。两个缓存目录在镜像中已存在且属于 uid `10001`，因此挂载到这里的新具名卷一开始就可写。
+旧版 root 镜像的缓存卷挂载在 `/root/...`：请改挂到上表路径，并以 root 运行一次
+`docker compose run --rm --user 0:0 <service> mcphub-migrate`，把其中属于 root 的文件交给 uid `10001`。
 
 这些路径默认都不是卷，因此只存在于容器的可写层。而可写层会在容器被**重建**时丢弃——升级镜像、
 执行 `docker compose down && up -d`，或修改任何服务配置都会触发重建。下次启动时，所有
@@ -191,8 +193,8 @@ networks:
 services:
   mcphub:
     volumes:
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
 
 volumes:
   mcphub_npm_cache:
@@ -200,9 +202,8 @@ volumes:
 ```
 
 具名卷可以在 `docker compose down` 后保留，只有 `down -v` 才会删除。绑定挂载
-（`./data/npm-cache:/root/.npm`）同样可行，也更方便手动查看或清理，但它不会像具名卷那样用镜像
-中该路径的内容初始化——而是直接遮蔽掉镜像里已有的东西。在 amd64 上，`-full` 镜像会在 `/root/.npm/_npx`
-中预装 Playwright，因此在该路径使用绑定挂载意味着要重新下载一次。
+（`./data/npm-cache:/home/mcphub/.npm`）同样可行，也更方便手动查看或清理，但它不会像具名卷那样用镜像
+中该路径的内容初始化——而是直接遮蔽掉镜像里已有的东西，并且宿主机目录必须对 uid `10001` 可写。
 
 几点值得注意：
 
@@ -214,7 +215,7 @@ volumes:
 - **预留足够空间。** 约 90 个 `stdio` 服务器大致占用 2 GB。
 - **安装内容损坏时**，请使用该服务器的「重新安装」操作——仅 `npx` 与 `uvx` 服务器支持。对
   `uvx` 而言，它只刷新那一个包（在下次启动时注入 `--refresh` 参数）；对 `npx` 而言，它会删除
-  整个共用的 `/root/.npm/_npx` 目录，因此下次启动时**所有** npx 服务器都会重新安装，而不只是
+  整个共用的 `/home/mcphub/.npm/_npx` 目录，因此下次启动时**所有** npx 服务器都会重新安装，而不只是
   你指定的那一个。`_cacache` 卷的作用就是让这次重装的代价变小。
 
 规模越大影响越明显。在一个约 95 个 `stdio` 服务器的部署中，冷启动重建后只有 19 个连接成功，
@@ -261,8 +262,8 @@ services:
       - ./servers.json:/app/servers.json:ro
       - ./data:/app/data
       - mcphub_logs:/app/logs
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
     depends_on:
       postgres:
         condition: service_healthy

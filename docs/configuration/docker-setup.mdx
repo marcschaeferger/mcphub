@@ -33,7 +33,48 @@ Existing file mounts at `/app/mcp_settings.json` are detected automatically and 
 
 #### Unprivileged user
 
-MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container starts as root only long enough to hand root-owned data (volumes written by older images, or `./data` directories created by Docker) over to that user. Files owned by a host user are never changed: if `/app/data` or the settings file and its sidecars are not writable for uid `10001` (for example a host-owned file mounted at `/app/mcp_settings.json`), MCPHub keeps running as root as before and logs a warning. To run unprivileged, keep the settings in the data directory and `chown -R 10001:10001` it. Set `MCPHUB_RUN_AS_ROOT=true` to always run as root. On platforms that forbid root (Kubernetes `runAsNonRoot`), start the container as `--user 10001:10001` / `runAsUser: 10001` with a data directory that uid `10001` can write. The `full` image keeps running as root because it starts the Docker daemon.
+The debian and wolfi images run as the unprivileged `mcphub` user (uid/gid `10001`) from the first process on. Nothing in the container switches users or changes file owners at runtime. MCPHub needs to write `/app/data` and, in file mode, the settings file and its sidecars (`.credentials.json`, `.credentials.key`, `.approvals.json`, `.capabilities.json`). If it cannot, the container exits with code 1 and prints the fix. Database mode (`DB_URL` or `USE_DB=true`) only needs `/app/data`, so the settings file can be a read-only mount there. A new named volume or an empty `./data` directory that uid `10001` can write works as is.
+
+Running the image as root (`--user 0:0`, `user: "0:0"`, `runAsUser: 0`) still works, but the entrypoint logs a warning on every start. Set `MCPHUB_RUN_AS_ROOT=true` to silence that warning when root is deliberate. The `full` image is built to run as root, because it starts the Docker daemon, and does not warn.
+
+### Upgrading from root images
+
+<Warning>
+  **Breaking change.** Earlier images started as root. Data they wrote is owned by root, and the current image exits with `ERROR: MCPHub runs as uid 10001 and cannot write: …` on it. `MCPHUB_RUN_AS_ROOT=true` no longer switches to root: the container runs as whatever user it is started as.
+</Warning>
+
+Hand the data over once with `mcphub-migrate`, which ships in the image. Run it as root with the same volumes as MCPHub, then start MCPHub as usual. Add `--dry-run` first to list what would change.
+
+```bash
+# docker run: use the same volume or ./data mount as the MCPHub container
+docker run --rm --user 0:0 -v ./data:/app/data samanhappy/mcphub:latest mcphub-migrate --dry-run
+docker run --rm --user 0:0 -v ./data:/app/data samanhappy/mcphub:latest mcphub-migrate
+
+# Docker Compose: <service> is the MCPHub service, e.g. mcphub
+docker compose run --rm --user 0:0 mcphub mcphub-migrate --dry-run
+docker compose run --rm --user 0:0 mcphub mcphub-migrate
+docker compose up -d
+```
+
+`mcphub-migrate` hands every entry owned by uid `0` under `/app/data`, under mounts below it, and under mounts at or below `/home/mcphub` (the npm and uv caches) to `10001:10001`. It changes symlinks themselves and never follows them, does not cross into other filesystems, and never touches files owned by any other uid, such as a host user. It prints a summary, exits 0, and changes nothing when run again. Remove any `user: "0:0"` (or `--user 0`) you added for older images.
+
+**Settings file mounted at `/app/mcp_settings.json`.** MCPHub writes its sidecar files next to the settings file. In `/app` uid `10001` cannot create them, so this layout stops working. `mcphub-migrate` does not change the host file. If `/app/data/mcp_settings.json` does not exist yet, it copies the file and any sidecars that are mounted next to it into `/app/data` (mode `0600`, owner `10001`). Then remove the `/app/mcp_settings.json` mount, and any `MCPHUB_SETTING_PATH` that points to it. If `/app/data/mcp_settings.json` already exists, it is left alone: compare the two files and keep the one you want in `/app/data`.
+
+**Kubernetes.** There is no migration run. Set the pod `securityContext` so the kubelet hands the volume to group `10001` on mount:
+
+```yaml
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+```
+
+`fsGroup` needs a volume type that supports ownership management (most block and `emptyDir` volumes do; some NFS and hostPath setups do not). For those, run `mcphub-migrate` once in a Job or init container that mounts the same volume and runs as root.
+
+**Cache volumes.** The npm and uv caches live in `/home/mcphub` (`HOME`), not in `/root`. Move cache volumes mounted at `/root/.npm` or `/root/.cache/uv` to `/home/mcphub/.npm` and `/home/mcphub/.cache/uv`, then run `mcphub-migrate` once; see [Persisting the stdio package cache](#persisting-the-stdio-package-cache).
 
 ### Image variants
 
@@ -43,7 +84,7 @@ There are three image variants. Releases publish all three. The debian and wolfi
 | --- | --- | --- | --- |
 | debian | `latest`, `X.Y.Z`, `edge` | `Dockerfile` | Default choice. Debian base, `apt-get` available for derived images. |
 | wolfi | `latest-wolfi`, `X.Y.Z-wolfi`, `edge-wolfi` | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
-| full | `latest-full`, `X.Y.Z-full`, `edge-full` | `Dockerfile` with `INSTALL_EXT=true` | Playwright browsers, Rust/Cargo or Docker-in-Docker are needed. Runs as root, see below. |
+| full | `latest-full`, `X.Y.Z-full`, `edge-full` | `Dockerfile` with `INSTALL_EXT=true` and `RUN_AS=0:0` | Playwright browsers, Rust/Cargo or Docker-in-Docker are needed. Runs as root, see below. |
 
 #### Tags and registries
 
@@ -106,11 +147,11 @@ docker run -d \
 
 ### Building with Extended Features
 
-The Docker image supports an `INSTALL_EXT` build argument to include additional tools. Published `-full` images are built with this enabled:
+The Docker image supports an `INSTALL_EXT` build argument to include additional tools. Published `-full` images are built with this enabled. The Docker daemon needs root, so a full build also needs `--build-arg RUN_AS=0:0`; without it the build stops with an error before the large downloads:
 
 ```bash
 # Build with extended features (includes stable Rust/Cargo, Docker Engine, Chrome + Firefox for Playwright)
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # Option 1: Run with automatic Docker-in-Docker (requires privileged mode)
 docker run -d \
@@ -177,8 +218,8 @@ services:
       - ./data:/app/data
       # Keep installed stdio server packages across container recreates.
       # See "Persisting the stdio package cache" below.
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
     depends_on:
       postgres:
         condition: service_healthy
@@ -220,19 +261,20 @@ networks:
 ### Persisting the stdio package cache
 
 `stdio` servers download and install their package on first use: `npx` through npm's
-caches, `uvx` and other `uv`-based commands through uv's. The image sets no `USER`, so it
-runs as `root` and those installs land in:
+caches, `uvx` and other `uv`-based commands through uv's. MCPHub runs with
+`HOME=/home/mcphub` (also in the `full` image, which runs as root), so those installs land in:
 
 | Path | Holds |
 | --- | --- |
-| `/root/.npm/_npx` | packages installed by `npx` |
-| `/root/.npm/_cacache` | npm's downloaded tarballs |
-| `/root/.cache/uv` | uv's download cache and the environments `uvx` creates |
+| `/home/mcphub/.npm/_npx` | packages installed by `npx` |
+| `/home/mcphub/.npm/_cacache` | npm's downloaded tarballs |
+| `/home/mcphub/.cache/uv` | uv's download cache and the environments `uvx` creates |
 
 Environments created by `uv tool install` live in `~/.local/share/uv/tools` instead. Those
-are baked into the image layer and are not affected by any of this. If you run the image as
-a non-root user, `~` is not `/root`: adjust both the paths above and the mount targets below
-to that user's home directory.
+are baked into the image layer and are not affected by any of this. Both cache directories
+exist in the image and belong to uid `10001`, so a new named volume mounted there starts out
+writable. Cache volumes from root images were mounted at `/root/...`: move them to the paths
+above and run `mcphub-migrate` once (see [Upgrading from root images](#upgrading-from-root-images)).
 
 None of these are volumes by default, so they live in the container's writable layer.
 That layer is discarded whenever the container is **recreated** — an image bump,
@@ -252,8 +294,8 @@ Mounting the two paths keeps the installs on the host:
 services:
   mcphub:
     volumes:
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
 
 volumes:
   mcphub_npm_cache:
@@ -261,10 +303,9 @@ volumes:
 ```
 
 Named volumes survive `docker compose down`; only `down -v` removes them. A bind mount
-(`./data/npm-cache:/root/.npm`) also works and is easier to inspect or clear by hand, but it
+(`./data/npm-cache:/home/mcphub/.npm`) also works and is easier to inspect or clear by hand, but it
 is not initialised from the image the way a named volume is — it hides whatever the image
-already holds at that path. On amd64 the `-full` image bakes a Playwright install
-into `/root/.npm/_npx`, so a bind mount there costs that download once.
+already holds at that path, and the host directory must be writable for uid `10001`.
 
 A few things worth knowing:
 
@@ -278,7 +319,7 @@ A few things worth knowing:
 - **To recover from a corrupted install**, use a server's *Reinstall* action — available
   for `npx` and `uvx` servers only. For `uvx` it refreshes just that package, through a
   `--refresh` flag on the next spawn. For `npx` it deletes the whole shared
-  `/root/.npm/_npx` directory, so every npx server reinstalls on its next start, not only
+  `/home/mcphub/.npm/_npx` directory, so every npx server reinstalls on its next start, not only
   the one you targeted. The `_cacache` volume is what keeps that reinstall cheap.
 
 This matters most at scale. On a deployment with ~95 `stdio` servers, a cold recreate left
@@ -329,8 +370,8 @@ services:
       - ./servers.json:/app/servers.json:ro
       - ./data:/app/data
       - mcphub_logs:/app/logs
-      - mcphub_npm_cache:/root/.npm
-      - mcphub_uv_cache:/root/.cache/uv
+      - mcphub_npm_cache:/home/mcphub/.npm
+      - mcphub_uv_cache:/home/mcphub/.cache/uv
     depends_on:
       postgres:
         condition: service_healthy
@@ -686,7 +727,7 @@ services:
 
 **Port conflicts**: Check if ports 3000/5432 are already in use
 
-**Volume mount issues**: Verify file paths and permissions
+**Volume mount issues**: Verify file paths and permissions. `ERROR: MCPHub runs as uid 10001 and cannot write` means the data was written by an older root image; see [Upgrading from root images](#upgrading-from-root-images).
 
 ### Debug Commands
 

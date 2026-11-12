@@ -296,6 +296,14 @@ Optional for Smart Routing:
           labels:
             app: mcphub
         spec:
+          securityContext:
+            # The image runs as uid 10001; fsGroup makes the volumes writable
+            # for it, OnRootMismatch skips the recursive change once done.
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
           initContainers:
             - name: prepare-config
               image: busybox:1.28

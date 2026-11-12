@@ -127,6 +127,18 @@ ENV HOME=/home/mcphub \
 # Docker engine (docker-in-docker needs the container to run as root and
 # privileged). Every download is checksum- or fingerprint-verified.
 ARG INSTALL_EXT=false
+# User the image runs as (applied by the final USER below). The full variant
+# must be built with --build-arg RUN_AS=0:0: dockerd cannot start as uid
+# 10001, so a full image without it would be broken in a way nobody notices
+# until Docker-in-Docker is used. The build fails here, before the large
+# downloads, instead of producing that image.
+ARG RUN_AS=${MCPHUB_UID}:${MCPHUB_GID}
+RUN if [ "$INSTALL_EXT" = "true" ]; then \
+  case "${RUN_AS%%:*}" in \
+  0 | root) ;; \
+  *) echo "ERROR: INSTALL_EXT=true (full variant, Docker-in-Docker) needs root, but RUN_AS=${RUN_AS}. Build it with: docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 ." >&2; exit 1 ;; \
+  esac; \
+  fi
 ARG RUSTUP_VERSION=1.29.3
 ARG RUSTUP_SHA256_AMD64=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 ARG RUSTUP_SHA256_ARM64=9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282
@@ -177,24 +189,25 @@ COPY package.json ./
 COPY bin ./bin
 COPY locales ./locales
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 mcphub-migrate.sh /usr/local/bin/mcphub-migrate
 
 # The application code stays root-owned and read-only for the runtime user;
 # only the data directory and HOME (npx/uvx caches, ~/.npmrc) are writable.
 RUN install -d -o mcphub -g mcphub -m 0750 /app/data
 
 # Pre-install the fetch server for the runtime user, into its HOME, so the
-# cache management in MCPHub can still refresh or remove it.
+# cache management in MCPHub can still refresh or remove it. The npm and uv
+# cache directories exist up front so named volumes mounted there start out
+# owned by the mcphub user instead of root.
 USER ${MCPHUB_UID}:${MCPHUB_GID}
-RUN uv tool install --no-cache mcp-server-fetch
+RUN uv tool install --no-cache mcp-server-fetch \
+  && mkdir -p /home/mcphub/.npm /home/mcphub/.cache/uv
 
-# The container starts as root only so the entrypoint can hand root-owned
-# state (volumes from older images, daemon-created bind mounts) to the mcphub
-# user; it then runs MCPHub as uid ${MCPHUB_UID} via setpriv. It stays root
-# only for Docker-in-Docker (full variant), MCPHUB_RUN_AS_ROOT=true or
-# settings the mcphub user cannot write (see entrypoint.sh).
-# Strictly non-root platforms can run it with --user 10001:10001 /
-# runAsUser: 10001, or build it with --build-arg RUN_AS=10001:10001.
-ARG RUN_AS=0:0
+# MCPHub runs as uid ${MCPHUB_UID} from the start; nothing in the image
+# changes users or file owners at runtime. Volumes written by older images
+# (which ran as root) are handed over once with `mcphub-migrate`, run as root
+# (see docs/configuration/docker-setup.mdx, "Upgrading from root images").
+# RUN_AS is declared above, next to the full-variant check.
 USER ${RUN_AS}
 
 EXPOSE 3000

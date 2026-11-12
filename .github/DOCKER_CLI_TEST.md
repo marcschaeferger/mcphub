@@ -18,7 +18,7 @@ docker run --rm mcphub:base docker --version
 
 ```bash
 # Build with extended features
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # Test Docker CLI, Cargo, and Rust are available
 docker run --rm mcphub:extended docker --version
@@ -33,7 +33,7 @@ docker run --rm --entrypoint sh mcphub:extended -c 'rustup --version && cargo --
 
 ```bash
 # Build with extended features
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # Run with privileged mode (allows Docker daemon to start)
 docker run -d \
@@ -64,7 +64,7 @@ docker rm mcphub-test
 
 ```bash
 # Build with extended features
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # Run with Docker socket mounted (uses host's daemon)
 docker run -d \
@@ -91,7 +91,7 @@ docker rm mcphub-test
 ```bash
 # Build both versions
 docker build -t mcphub:base .
-docker build --build-arg INSTALL_EXT=true -t mcphub:extended .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 -t mcphub:extended .
 
 # Compare image sizes
 docker images mcphub:*
@@ -105,10 +105,10 @@ docker images mcphub:*
 
 ```bash
 # On AMD64/x86_64
-docker build --build-arg INSTALL_EXT=true --platform linux/amd64 -t mcphub:extended-amd64 .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 --platform linux/amd64 -t mcphub:extended-amd64 .
 
 # On ARM64
-docker build --build-arg INSTALL_EXT=true --platform linux/arm64 -t mcphub:extended-arm64 .
+docker build --build-arg INSTALL_EXT=true --build-arg RUN_AS=0:0 --platform linux/arm64 -t mcphub:extended-arm64 .
 ```
 
 **Expected Result**: 

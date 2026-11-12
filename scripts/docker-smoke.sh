@@ -9,9 +9,11 @@
 #   3. the admin login works,
 #   4. a stdio server started with uvx and one started with npx connect,
 #   5. a tool call is answered end to end,
-#   6. the image ships no pip (nor a pip wheel) and `uv venv` still works.
+#   6. the image ships no pip (nor a pip wheel) and `uv venv` still works,
+#   7. a root-owned data volume (from an older root image) stops the start
+#      with an ERROR, and `mcphub-migrate` run as root fixes it.
 # Needs docker, curl and jq on the host. The credentials are random per run,
-# are never printed and the container is removed on exit.
+# are never printed; the container and the test volume are removed on exit.
 #
 # Exit codes: 0 all checks passed, 1 a check failed, 2 usage or missing tool.
 set -euo pipefail
@@ -38,6 +40,7 @@ done
 WORKDIR=$(mktemp -d)
 chmod 700 "$WORKDIR"
 CONTAINER="mcphub-smoke-$$-$RANDOM"
+VOLUME="${CONTAINER}-data"
 
 cleanup() {
   local rc=$?
@@ -49,6 +52,7 @@ cleanup() {
       | sed -E 's/(password|token)[^ ]*[: =]+[^ ]+/\1 ***/Ig' >&2 || true
   fi
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true
   rm -rf "$WORKDIR"
   exit "$rc"
 }
@@ -78,7 +82,7 @@ done
 [ "$status" = "healthy" ] || die "container not healthy after ${HEALTHY_TIMEOUT}s (status: $status)"
 ok "container healthy"
 
-# 2. runs as the unprivileged uid (entrypoint drops root via setpriv)
+# 2. runs as the unprivileged uid (the image's default user, no switch at runtime)
 uid=$(docker exec "$CONTAINER" ps -eo uid=,args= | awk '$2 == "node" && $3 == "dist/index.js" {print $1; exit}')
 [ "$uid" = "$EXPECTED_UID" ] || die "MCPHub runs as uid '${uid:-unknown}', expected $EXPECTED_UID"
 ok "MCPHub runs as uid $uid"
@@ -142,5 +146,22 @@ wheels=$(docker exec "$CONTAINER" python3 -c \
 docker exec -u "$EXPECTED_UID" "$CONTAINER" uv venv --quiet /tmp/smoke-venv >/dev/null 2>&1 \
   || die "uv venv failed"
 ok "no pip in the image, uv venv works"
+
+# 7. upgrade from a root image: a volume whose files belong to root must stop
+# the start with the ERROR, and mcphub-migrate (as root) must hand it over.
+# `true` as the command runs only the entrypoint's checks, not MCPHub.
+docker volume create "$VOLUME" >/dev/null || die "could not create a test volume"
+docker run --rm --user 0:0 --entrypoint sh -v "$VOLUME:/app/data" "$IMAGE" \
+  -c 'echo "{}" > /app/data/mcp_settings.json && chown -R 0:0 /app/data' \
+  || die "could not prepare a root-owned volume"
+if out=$(docker run --rm -v "$VOLUME:/app/data" "$IMAGE" true 2>&1); then
+  die "start on a root-owned volume did not fail"
+fi
+printf '%s' "$out" | grep -q 'ERROR: MCPHub runs as uid' || die "start on a root-owned volume failed without the ERROR"
+docker run --rm --user 0:0 -v "$VOLUME:/app/data" "$IMAGE" mcphub-migrate >/dev/null \
+  || die "mcphub-migrate failed"
+docker run --rm -v "$VOLUME:/app/data" "$IMAGE" true >/dev/null 2>&1 \
+  || die "start still fails after mcphub-migrate"
+ok "root-owned volume refused, mcphub-migrate hands it over"
 
 echo "PASS: $IMAGE"

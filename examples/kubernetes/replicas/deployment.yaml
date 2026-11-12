@@ -17,6 +17,15 @@ spec:
         app.kubernetes.io/name: mcphub
     spec:
       automountServiceAccountToken: false
+      # The image runs as uid 10001. fsGroup hands mounted volumes to that
+      # group; OnRootMismatch skips the recursive change once it is done.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
       terminationGracePeriodSeconds: 30
       topologySpreadConstraints:
         - maxSkew: 1
@@ -31,10 +40,15 @@ spec:
           imagePullPolicy: Always
           ports:
             - { name: http, containerPort: 3000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           envFrom:
             - configMapRef: { name: mcphub-config }
             - secretRef: { name: mcphub-secrets }
           env:
+            - { name: npm_config_userconfig, value: /tmp/.npmrc }
             - name: MCPHUB_NODE_ID
               valueFrom:
                 fieldRef: { fieldPath: metadata.name }
@@ -61,9 +75,21 @@ spec:
                 command: [node, -e, 'setTimeout(() => {}, 5000)']
           volumeMounts:
             - { name: settings, mountPath: /etc/mcphub, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: data, mountPath: /app/data }
+            - { name: npm-cache, mountPath: /home/mcphub/.npm }
+            - { name: uv-cache, mountPath: /home/mcphub/.cache }
       volumes:
         - name: settings
           configMap: { name: mcphub-settings }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: data
+          emptyDir: { sizeLimit: 64Mi }
+        - name: npm-cache
+          emptyDir: { sizeLimit: 512Mi }
+        - name: uv-cache
+          emptyDir: { sizeLimit: 512Mi }
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

@@ -22,6 +22,14 @@
     {
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
+    },
+    {
+      "description": "Wolfi base image: a rolling :latest, so the digest moves often. Bump it weekly in its own PR.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["cgr.dev/chainguard/**"],
+      "pinDigests": true,
+      "schedule": ["before 6am on monday"],
+      "groupName": "wolfi base image"
     }
   ]
 }

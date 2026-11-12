@@ -23,6 +23,7 @@ assets
 examples
 *.md
 Dockerfile
+Dockerfile.*
 docker-compose*.yml
 jest.config.cjs
 tsconfig.test.json

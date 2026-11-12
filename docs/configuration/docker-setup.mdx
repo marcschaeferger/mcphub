@@ -35,6 +35,25 @@ Existing file mounts at `/app/mcp_settings.json` are detected automatically and 
 
 MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container starts as root only long enough to hand root-owned data (volumes written by older images, or `./data` directories created by Docker) over to that user. Files owned by a host user are never changed: if `/app/data` or the settings file and its sidecars are not writable for uid `10001` (for example a host-owned file mounted at `/app/mcp_settings.json`), MCPHub keeps running as root as before and logs a warning. To run unprivileged, keep the settings in the data directory and `chown -R 10001:10001` it. Set `MCPHUB_RUN_AS_ROOT=true` to always run as root. On platforms that forbid root (Kubernetes `runAsNonRoot`), start the container as `--user 10001:10001` / `runAsUser: 10001` with a data directory that uid `10001` can write. The `full` image keeps running as root because it starts the Docker daemon.
 
+### Image variants
+
+There are three image variants. Releases publish the debian and full variants. The wolfi variant is not published yet: build it yourself from `Dockerfile.wolfi`. The debian and wolfi variants run MCPHub as uid `10001`. The full variant runs as root.
+
+On pull requests to `main` and `develop`, pushes to `main` and a weekly schedule, the Security workflow builds a local amd64 image from `Dockerfile` and from `Dockerfile.wolfi`, smoke-tests both and scans them with Trivy. The images that releases publish are built separately by the Build workflow, multi-arch, and do not go through this smoke test and image scan.
+
+| Variant | Tags | Dockerfile | Use it when |
+| --- | --- | --- | --- |
+| debian | `latest`, `X.Y.Z`, `edge` | `Dockerfile` | Default choice. Debian base, `apt-get` available for derived images. |
+| wolfi | none, build from source | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
+| full | `latest-full`, `X.Y.Z-full`, `edge-full` | `Dockerfile` with `INSTALL_EXT=true` | Playwright browsers, Rust/Cargo or Docker-in-Docker are needed. Runs as root, see below. |
+
+```bash
+# Build the Wolfi variant from a checkout of this repository
+docker build -f Dockerfile.wolfi -t mcphub:wolfi .
+```
+
+Both base variants contain the same Node.js 22, npm 11, Python 3.13, uv/uvx and Git, so stdio servers started with `npx` or `uvx` behave the same. Derived images that install packages with `apt-get` need the Debian variant: the Wolfi variant uses `apk` instead. The `full` variant exists only on Debian, and `docker build --build-arg INSTALL_EXT=true -f Dockerfile.wolfi .` fails with an error that points there.
+
 ### Building from Source
 
 ```bash

@@ -1,0 +1,107 @@
+# Hardened MCPHub with external MCP server containers
+
+A Docker Compose example that runs MCPHub with a locked-down container and
+keeps MCP servers out of the MCPHub container.
+
+```bash
+docker compose up -d --build
+docker compose logs mcphub | grep "Generated admin password"
+# UI: http://127.0.0.1:3000  (change the port with MCPHUB_PORT)
+```
+
+Use `MCPHUB_IMAGE` to pick another image (default `samanhappy/mcphub:latest`).
+
+## Why external containers
+
+A `stdio` server is a child process inside the MCPHub container. It runs as the
+same uid as MCPHub and can read everything MCPHub can read, including the
+settings, credential store and encryption key in `/app/data`, and therefore the
+secrets of every other server. Here the MCP servers run in their own containers
+with their own filesystem and uid, on an internal network, and MCPHub reaches
+them as `streamable-http` upstreams.
+
+| Service | What it is |
+| --- | --- |
+| `mcphub` | MCPHub, published on `127.0.0.1` only |
+| `everything` | `@modelcontextprotocol/server-everything` 2.3.0, native streamable-http (built from `everything/`) |
+| `fetch-gateway` | stdio-only `mcp-server-fetch` behind `mcp-proxy`, served as `/mcp` and `/sse` (built from `fetch-gateway/`) |
+| `mcphub-seed` | one-shot, copies `mcp_settings.json` into the data volume if none exists |
+
+Versions are pinned and installed at build time, from digest-pinned base
+images. Nothing is downloaded when the MCP server containers start.
+
+## What the flags do
+
+| Setting | Effect |
+| --- | --- |
+| `user: "10001:10001"` | Runs unprivileged from the first process; the entrypoint does not need root |
+| `read_only: true` | Root filesystem is immutable; only `/tmp` (tmpfs) and the named volumes are writable |
+| `cap_drop: [ALL]` | No Linux capabilities |
+| `no-new-privileges` | setuid binaries cannot gain privileges |
+| `tmpfs: /tmp` | Writable scratch space that disappears on restart (`nosuid`; `noexec` on the MCP server containers) |
+| `mcphub-data` volume | `/app/data`: settings, users, credentials and their key |
+| `mcphub-home` volume | `HOME`: the pre-installed `mcp-server-fetch`, plus npx/uvx caches. It must be a volume, not tmpfs, otherwise the pre-installed tool is hidden. A fresh named volume is initialised from the image with owner 10001 |
+| `pids_limit`, `mem_limit`, `cpus` | Modest defaults against fork bombs and runaway servers; raise them if your servers need it |
+| `127.0.0.1:${MCPHUB_PORT:-3000}:3000` | Not reachable from other hosts; put a reverse proxy with TLS in front |
+| `mcp` network, `internal: true` | MCP servers have no route to or from the internet |
+| `egress` network | Added only to `fetch-gateway`, because the fetch tool downloads web pages. `everything` does not need it |
+| HEALTHCHECK | Inherited from the image (`/livez`) |
+
+Notes on the example:
+
+- **Settings live in the data volume.** MCPHub rewrites `mcp_settings.json` and
+  writes credential and approval files next to it, so it cannot be a read-only
+  mount. `mcphub-seed` copies the example file on the first start and never
+  overwrites an existing one. Later changes are made in the UI or in the volume.
+- **`"owner": "admin"`** in the settings marks the servers as admin-owned.
+  MCPHub's SSRF guard blocks private addresses (such as the Compose network)
+  for servers without an admin owner. Alternatively, allow the network range
+  with `network.allowedCidrs` in the system configuration.
+- `everything` needs `HOST=0.0.0.0` (it binds loopback by default), and
+  `mcp-proxy` needs `--allowed-host fetch-gateway:8080` (it rejects other Host
+  headers by default). Both are set in `compose.yaml`.
+- `mcp-proxy` and `mcp-server-fetch` live in separate virtualenvs because their
+  current releases require incompatible `mcp` SDK ranges.
+
+## Gateway endpoints have no auth
+
+The `everything` and `fetch-gateway` HTTP endpoints accept any caller that can
+reach them. That is why they sit only on the internal `mcp` network with no
+published ports. Do not publish them. For defence in depth, enable a bearer
+token on the gateway and send it from MCPHub:
+
+```yaml
+# compose.yaml: set the same variable on fetch-gateway and on mcphub
+environment:
+  MCP_PROXY_AUTH_TOKEN: ${FETCH_GATEWAY_TOKEN}   # fetch-gateway; keep the value in .env, not in git
+  FETCH_GATEWAY_TOKEN: ${FETCH_GATEWAY_TOKEN}    # mcphub, expanded in the settings below
+```
+
+```json
+"fetch": {
+  "type": "streamable-http",
+  "url": "http://fetch-gateway:8080/mcp",
+  "headers": { "Authorization": "Bearer ${FETCH_GATEWAY_TOKEN}" },
+  "owner": "admin"
+}
+```
+
+## Never mount the Docker socket
+
+Do not mount `/var/run/docker.sock` into MCPHub or any MCP server. Access to the
+socket is root on the host and undoes every flag above.
+
+## Upgrading from old root images
+
+See the migration notes. Ownership of the existing data must belong to uid/gid
+10001, for example:
+
+```bash
+docker run --rm -v mcphub-data:/d alpine chown -R 10001:10001 /d
+```
+
+## Clean up
+
+```bash
+docker compose down -v   # also deletes the data and home volumes
+```

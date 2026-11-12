@@ -35,6 +35,10 @@ Existing file mounts at `/app/mcp_settings.json` are detected automatically and 
 
 MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container starts as root only long enough to hand root-owned data (volumes written by older images, or `./data` directories created by Docker) over to that user. Files owned by a host user are never changed: if `/app/data` or the settings file and its sidecars are not writable for uid `10001` (for example a host-owned file mounted at `/app/mcp_settings.json`), MCPHub keeps running as root as before and logs a warning. To run unprivileged, keep the settings in the data directory and `chown -R 10001:10001` it. Set `MCPHUB_RUN_AS_ROOT=true` to always run as root. On platforms that forbid root (Kubernetes `runAsNonRoot`), start the container as `--user 10001:10001` / `runAsUser: 10001` with a data directory that uid `10001` can write. The `full` image keeps running as root because it starts the Docker daemon.
 
+### Hardened deployment
+
+For a locked-down setup, use the [hardened Compose example](https://github.com/samanhappy/mcphub/tree/main/examples/docker-compose/hardened). It runs MCPHub as uid `10001` with a read-only root filesystem, all capabilities dropped, `no-new-privileges`, resource limits and a loopback-only port. MCP servers run in separate containers on an internal network and are wired in as `streamable-http` upstreams, so they cannot read MCPHub's data volume. The example's README explains each setting.
+
 ### Building from Source
 
 ```bash

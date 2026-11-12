@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "everything": {
+      "type": "streamable-http",
+      "url": "http://everything:3001/mcp",
+      "owner": "admin"
+    },
+    "fetch": {
+      "type": "streamable-http",
+      "url": "http://fetch-gateway:8080/mcp",
+      "owner": "admin"
+    }
+  }
+}

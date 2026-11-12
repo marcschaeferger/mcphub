@@ -322,6 +322,42 @@ describe('mcphub-migrate', () => {
     expect(result.stdout).toContain(`${home}/.npm: would hand 2 root-owned entries`);
   });
 
+  it('treats mounts below the data directory as boundaries', () => {
+    install(true);
+    fs.writeFileSync(path.join(data, 'mcp_settings.json'), '{}');
+    const hostDir = path.join(data, 'hostdir');
+    fs.mkdirSync(hostDir);
+    fs.writeFileSync(path.join(hostDir, 'f'), 'x');
+    fs.writeFileSync(path.join(data, 'hostfile'), 'x');
+    fs.writeFileSync(
+      path.join(directory, 'mountinfo'),
+      `1 0 0:1 / / rw - overlay overlay rw\n` +
+        `2 1 0:2 /h/rootdir ${hostDir} rw - ext4 /dev/x rw\n` +
+        `3 1 0:2 /h/rootfile ${data}/hostfile rw - ext4 /dev/x rw\n`,
+    );
+
+    const result = migrate('--dry-run');
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(`would chown 10001:10001: ${hostDir}`);
+    expect(result.stdout).not.toContain(`would chown 10001:10001: ${data}/hostfile`);
+    expect(result.stdout).toContain(`${hostDir}: a separate mount; it is not changed`);
+    expect(result.stdout).toContain(`${data}/hostfile: a single file is mounted here`);
+    expect(result.stdout).toContain('2 entries would be handed');
+
+    const included = migrate('--dry-run', '--include-mounts');
+    expect(included.status).toBe(0);
+    // Each entry is listed once: the mount is pruned from the data scan.
+    expect(included.stdout.split(`would chown 10001:10001: ${hostDir}/f\n`).length).toBe(2);
+    expect(included.stdout).toContain(`${hostDir}: would hand 2 root-owned entries`);
+    expect(included.stdout).not.toContain(`would chown 10001:10001: ${data}/hostfile`);
+    expect(included.stdout).toContain('4 entries would be handed');
+
+    const real = migrate();
+    expect(real.status).toBe(0);
+    expect(chownCalls()).not.toContain(hostDir);
+    expect(chownCalls()).not.toContain('hostfile');
+  });
+
   it('copies a legacy settings file mount into the data directory once', () => {
     install(true);
     const legacy = path.join(directory, 'app/mcp_settings.json');

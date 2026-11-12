@@ -177,6 +177,7 @@ COPY package.json ./
 COPY bin ./bin
 COPY locales ./locales
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 mcphub-migrate.sh /usr/local/bin/mcphub-migrate
 
 # The application code stays root-owned and read-only for the runtime user;
 # only the data directory and HOME (npx/uvx caches, ~/.npmrc) are writable.

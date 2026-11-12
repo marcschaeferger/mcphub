@@ -35,6 +35,7 @@ type MockResponse = {
   redirect: jest.Mock;
   type: jest.Mock;
   send: jest.Mock;
+  setHeader: jest.Mock;
 };
 
 const createResponse = (): MockResponse => {
@@ -44,6 +45,7 @@ const createResponse = (): MockResponse => {
     redirect: jest.fn().mockReturnThis(),
     type: jest.fn().mockReturnThis(),
     send: jest.fn().mockReturnThis(),
+    setHeader: jest.fn().mockReturnThis(),
   };
 
   return res;
@@ -58,6 +60,9 @@ const createRequest = (overrides: Record<string, unknown> = {}) => ({
   },
   body: {},
   header: jest.fn().mockReturnValue(undefined),
+  // The hub's public origin: RFC 8707 resources must lie under it.
+  protocol: 'https',
+  headers: { host: 'mcphub.example.com' },
   originalUrl: '/oauth/authorize?client_id=trusted-client',
   t: (key: string) => key,
   ...overrides,
@@ -113,8 +118,11 @@ describe('oauthServerController getAuthorize consent shell', () => {
       scope: 'read write',
     });
     expect(context.scopes).toEqual([
-      { name: 'read', description: 'Read access to your MCP servers and tools' },
-      { name: 'write', description: 'Execute tools and modify MCP server configurations' },
+      {
+        name: 'read',
+        description: 'List and read tools, prompts and resources (cannot run tools)',
+      },
+      { name: 'write', description: 'Run tools on the MCP servers you can access' },
     ]);
 
     expect(res.type).toHaveBeenCalledWith('html');
@@ -123,7 +131,7 @@ describe('oauthServerController getAuthorize consent shell', () => {
     );
   });
 
-  it('includes state, PKCE and token fields in the injected consent context when present', async () => {
+  it('includes state, PKCE and consent ticket fields in the injected consent context when present', async () => {
     (injectOAuthConsentShell as jest.Mock).mockReturnValue('<html>shell</html>');
 
     const req = createRequest({
@@ -135,7 +143,7 @@ describe('oauthServerController getAuthorize consent shell', () => {
         state: 'state-123',
         code_challenge: 'abc123',
         code_challenge_method: 'S256',
-        token: 'jwt-token',
+        consent_ticket: 'consent-ticket',
       },
     });
     const res = createResponse();
@@ -147,8 +155,11 @@ describe('oauthServerController getAuthorize consent shell', () => {
       state: 'state-123',
       codeChallenge: 'abc123',
       codeChallengeMethod: 'S256',
-      token: 'jwt-token',
+      consentTicket: 'consent-ticket',
     });
+    expect(context).not.toHaveProperty('token');
+    expect(res.setHeader).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 
   it('falls back to the legacy inline consent HTML when the frontend shell is unavailable', async () => {
@@ -207,69 +218,68 @@ describe('oauthServerController getAuthorize consent shell', () => {
     });
   });
 
-  it('resolves /mcp/{name} to a server via the DAOs', async () => {
-    (getServerDao as jest.Mock).mockReturnValue({
-      findById: jest.fn().mockResolvedValue({ name: 'toggl' }),
-    });
-
+  const consentResourceFor = async (resource?: string) => {
+    (injectOAuthConsentShell as jest.Mock).mockReturnValue('<html>shell</html>');
     const req = createRequest({
       query: {
         client_id: 'trusted-client',
         redirect_uri: 'https://trusted.example.com/callback',
         response_type: 'code',
         scope: 'read',
-        resource: 'https://mcphub.example.com/mcp/toggl',
+        state: 'xyz',
+        ...(resource === undefined ? {} : { resource }),
       },
     });
     const res = createResponse();
-
     await getAuthorize(req as any, res as any);
+    return { res, context: (injectOAuthConsentShell as jest.Mock).mock.calls[0]?.[0] };
+  };
 
-    const context = (injectOAuthConsentShell as jest.Mock).mock.calls[0][0];
+  it('labels /mcp/{name} that is no group as the server the token is bound to', async () => {
+    const { context } = await consentResourceFor('https://mcphub.example.com/mcp/toggl');
     expect(context.resource).toMatchObject({ kind: 'server', name: 'toggl' });
   });
 
-  it('resolves /mcp/{name} to a group via the DAOs (group wins over server)', async () => {
+  it('labels a group by its name, whether addressed by name or id', async () => {
+    const group = { id: '11111111-1111-4111-8111-111111111111', name: 'team' };
     (getGroupDao as jest.Mock).mockReturnValue({
-      findByName: jest.fn().mockResolvedValue({ name: 'toggl' }),
+      findByName: jest.fn(async (name: string) => (name === group.name ? group : null)),
+      findById: jest.fn(async (id: string) => (id === group.id ? group : null)),
     });
-
-    const req = createRequest({
-      query: {
-        client_id: 'trusted-client',
-        redirect_uri: 'https://trusted.example.com/callback',
-        response_type: 'code',
-        scope: 'read',
-        resource: 'https://mcphub.example.com/mcp/toggl',
-      },
-    });
-    const res = createResponse();
-
-    await getAuthorize(req as any, res as any);
-
-    const context = (injectOAuthConsentShell as jest.Mock).mock.calls[0][0];
-    expect(context.resource).toMatchObject({ kind: 'group', name: 'toggl' });
+    for (const ref of [group.name, group.id]) {
+      jest.clearAllMocks();
+      const { context } = await consentResourceFor(`https://mcphub.example.com/mcp/${ref}`);
+      expect(context.resource).toMatchObject({ kind: 'group', name: 'team' });
+    }
   });
 
-  it('marks /mcp/{name} as unknown when it matches no server or group', async () => {
-    const req = createRequest({
-      query: {
-        client_id: 'trusted-client',
-        redirect_uri: 'https://trusted.example.com/callback',
-        response_type: 'code',
-        scope: 'read',
-        resource: 'https://mcphub.example.com/mcp/does-not-exist',
-      },
-    });
-    const res = createResponse();
+  it.each([
+    ['no resource', undefined, { kind: 'all', raw: '' }],
+    ['/sse', 'https://mcphub.example.com/sse', { kind: 'all' }],
+    ['a user-scoped aggregate route', 'https://mcphub.example.com/alice/mcp', { kind: 'all' }],
+    ['/sse/{name}', 'https://mcphub.example.com/sse/toggl', { kind: 'server', name: 'toggl' }],
+    ['$smart', 'https://mcphub.example.com/mcp/$smart', { kind: 'smart' }],
+    [
+      '$smart/{group}',
+      'https://mcphub.example.com/mcp/$smart/toggl',
+      { kind: 'smart', name: 'toggl' },
+    ],
+  ])('labels %s as the target it covers', async (_label, resource, expected) => {
+    const { context } = await consentResourceFor(resource);
+    expect(context.resource).toMatchObject(expected);
+  });
 
-    await getAuthorize(req as any, res as any);
-
-    const context = (injectOAuthConsentShell as jest.Mock).mock.calls[0][0];
-    expect(context.resource).toMatchObject({
-      kind: 'unknown',
-      name: 'does-not-exist',
-    });
+  it.each([
+    ['another origin', 'https://evil.example/mcp'],
+    ['a non-MCP path', 'https://mcphub.example.com/api/servers'],
+    ['another user', 'https://mcphub.example.com/bob/mcp'],
+  ])('rejects %s with invalid_target instead of showing consent', async (_label, resource) => {
+    const { res, context } = await consentResourceFor(resource);
+    expect(context).toBeUndefined();
+    const location = new URL(res.redirect.mock.calls[0][0]);
+    expect(location.origin + location.pathname).toBe('https://trusted.example.com/callback');
+    expect(location.searchParams.get('error')).toBe('invalid_target');
+    expect(location.searchParams.get('state')).toBe('xyz');
   });
 
   it('passes RFC 7591 client metadata into the consent context', async () => {

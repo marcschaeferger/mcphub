@@ -1,4 +1,5 @@
 import { resolveJwtUser } from '../utils/userSession.js';
+import { isQueryTokenAllowed } from '../utils/urlTicket.js';
 import { Request, Response, NextFunction } from 'express';
 import { getSystemConfigDao } from '../dao/index.js';
 import { UserContextService } from '../services/userContextService.js';
@@ -45,8 +46,11 @@ const resolveAuthenticatedUserForSse = async (req: Request): Promise<IUser | nul
     return null;
   }
 
+  // Like /api, the 24h dashboard JWT is not taken from `?token=` (it leaks into
+  // proxy logs and history) unless MCPHUB_ALLOW_QUERY_TOKEN=true opts back in.
   const headerToken = req.header('x-auth-token');
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const queryToken =
+    isQueryTokenAllowed() && typeof req.query.token === 'string' ? req.query.token : undefined;
   const token = headerToken || queryToken;
   return token ? resolveJwtUser(token) : null;
 };

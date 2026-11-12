@@ -21358,7 +21358,7 @@
       "GITHUB_PERSONAL_ACCESS_TOKEN": {
         "description": "Personal Access Token for GitHub to authenticate API requests",
         "required": true,
-        "example": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        "example": "your_github_pat_here"
       }
     },
     "installations": {
@@ -38579,7 +38579,7 @@
       "METORO_AUTH_TOKEN": {
         "description": "Authentication token for Metoro API access",
         "required": true,
-        "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjdXN0b21lcklkIjoiOThlZDU1M2QtYzY4ZC00MDRhLWFhZjItNDM2ODllNWJiMGUzIiwiZW1haWwiOiJ0ZXN0QGNocmlzYmF0dGFyYmVlLmNvbSIsImV4cCI6MTgyMTI0NzIzN30.7G6alDpcZh_OThYj293Jce5rjeOBqAhOlANR_Fl5auw"
+        "example": "<metoro-jwt-token>"
       },
       "METORO_API_URL": {
         "description": "URL for the Metoro API",
@@ -49025,7 +49025,7 @@
       "STRIPE_SECRET_KEY": {
         "description": "Your Stripe secret API key required for authenticating requests to the Stripe API.",
         "required": true,
-        "example": "sk_test_4eC39HqLyjWDarjtT1zdp7dc"
+        "example": "replace_with_your_stripe_secret_key"
       }
     },
     "tools": [
@@ -74609,7 +74609,7 @@
       "DESCOPE_MANAGEMENT_KEY": {
         "description": "Your Descope Management Key",
         "required": true,
-        "example": "sk_test_4eC39HqLyjEDERyCzKZQz9fgo"
+        "example": "replace_with_your_descope_management_key"
       }
     }
   },

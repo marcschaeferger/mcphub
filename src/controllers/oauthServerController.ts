@@ -1,5 +1,6 @@
 import { findReusableApproval, resolveConsentScopes } from '../services/oauthApprovalService.js';
 import { getUserSessionVersion, resolveJwtUser } from '../utils/userSession.js';
+import { isQueryTokenAllowed, verifyUrlTicket } from '../utils/urlTicket.js';
 import { Request, Response } from 'express';
 import {
   getOAuthServer,
@@ -7,7 +8,7 @@ import {
   handleAuthenticateRequest,
 } from '../services/oauthServerService.js';
 import { findOAuthClientIncludingCimd, isCimdClientId } from '../services/cimdClientService.js';
-import { getSystemConfigDao, getGroupDao, getServerDao } from '../dao/index.js';
+import { getSystemConfigDao } from '../dao/index.js';
 import OAuth2Server from '@node-oauth/oauth2-server';
 import { resolveBetterAuthUser } from '../services/betterAuthSession.js';
 import { cloneDefaultOAuthServerConfig } from '../constants/oauthServerDefaults.js';
@@ -21,7 +22,12 @@ import {
   type OAuthConsentContext,
   type ConsentClientInfo,
 } from '../utils/frontendShell.js';
-import { parseResourceTarget, type ResourceTarget } from '../utils/oauthConsentResource.js';
+import type { ResourceTarget } from '../utils/oauthConsentResource.js';
+import {
+  describeResourceTarget,
+  getResourceAuthorizationError,
+} from '../services/oauthResourceBinding.js';
+import { getPublicResourceBase } from '../utils/protectedResource.js';
 
 const { Request: OAuth2Request, Response: OAuth2Response } = OAuth2Server;
 
@@ -61,22 +67,34 @@ async function resolveBetterAuthUserForAuthorize(req: Request): Promise<Authenti
 }
 
 /**
- * Attempt to attach a user to the request based on a JWT token present in header, query, or body.
+ * Attempt to attach a user to the request from a JWT in the header or POST
+ * body, or from an `oauth-consent` ticket (query or body) bound to this
+ * request's client_id and redirect_uri. The session JWT itself is no longer
+ * taken from the query string: it leaked into proxy logs and browser history
+ * (MCPHUB_ALLOW_QUERY_TOKEN=true restores the legacy behaviour).
  */
 async function resolveUserFromRequest(req: Request): Promise<AuthenticatedUser | null> {
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+    string,
+    unknown
+  >;
   const headerToken = req.header('x-auth-token');
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
-  const bodyToken =
-    req.body && typeof (req.body as Record<string, unknown>).token === 'string'
-      ? ((req.body as Record<string, string>).token as string)
-      : undefined;
+  const queryToken =
+    isQueryTokenAllowed() && typeof req.query.token === 'string' ? req.query.token : undefined;
+  const bodyToken = typeof body.token === 'string' ? body.token : undefined;
   const token = headerToken || queryToken || bodyToken;
 
-  if (!token) {
-    return null;
+  let user = token ? await resolveJwtUser(token) : null;
+  if (!user) {
+    const ticket = readConsentTicket(req);
+    const params = req.method === 'GET' ? req.query : body;
+    if (ticket && typeof params.client_id === 'string' && typeof params.redirect_uri === 'string') {
+      user = await verifyUrlTicket(ticket, 'oauth-consent', {
+        client_id: params.client_id,
+        redirect_uri: params.redirect_uri,
+      });
+    }
   }
-
-  const user = await resolveJwtUser(token);
   return user
     ? {
         username: user.username,
@@ -85,6 +103,12 @@ async function resolveUserFromRequest(req: Request): Promise<AuthenticatedUser |
       }
     : null;
 }
+
+const readConsentTicket = (req: Request): string | undefined => {
+  if (typeof req.query.consent_ticket === 'string') return req.query.consent_ticket;
+  const bodyTicket = (req.body as Record<string, unknown> | undefined)?.consent_ticket;
+  return typeof bodyTicket === 'string' ? bodyTicket : undefined;
+};
 
 /**
  * Helper function to escape HTML
@@ -189,6 +213,8 @@ const generateAuthorizeHtml = (
     approveButtonLabel: string;
     denyButtonLabel: string;
     formFields: string;
+    /** What the token will cover (RFC 8707 resource), see formatResourceLabel. */
+    resourceLabel?: string;
   },
 ): string => {
   const backgroundColor = '#eef5ff';
@@ -237,6 +263,14 @@ const generateAuthorizeHtml = (
             <span class="client-box-label">${escapeHtml(options.clientName ? 'Application' : 'Client')}</span>
             <span class="client-box-name">${escapeHtml(options.clientName || '')}</span>
           </div>
+          ${
+            options.resourceLabel
+              ? `<div class="client-box">
+            <span class="client-box-label">${escapeHtml('Access to')}</span>
+            <span class="client-box-name">${escapeHtml(options.resourceLabel)}</span>
+          </div>`
+              : ''
+          }
           <div class="scopes">
             <div class="scopes-title">${escapeHtml('This application will be able to:')}</div>
             ${options.scopes
@@ -275,37 +309,72 @@ const generateAuthorizeHtml = (
 };
 
 /**
- * Resolve an RFC 8707 `resource` URI into a display target for the consent
- * screen, disambiguating `/mcp/{name}` between a group and a single server.
- * Best-effort: unknown or unresolvable targets are surfaced as-is, never
- * blocking the authorization request.
+ * Describe the RFC 8707 `resource` for the consent screen with the same parsing
+ * that enforces the token's audience. No resource means every MCP server the
+ * user can access, which is what such a token covers.
  */
-async function resolveResourceTarget(raw: string | undefined): Promise<ResourceTarget | undefined> {
-  if (!raw) {
-    return undefined;
-  }
-
-  const parsed = parseResourceTarget(raw);
-  if (parsed.kind !== 'target' || !parsed.name) {
-    return parsed;
-  }
-
+async function resolveResourceTarget(
+  req: Request,
+  raw: string | undefined,
+): Promise<ResourceTarget | undefined> {
   try {
-    const [group, server] = await Promise.all([
-      getGroupDao().findByName(parsed.name),
-      getServerDao().findById(parsed.name),
-    ]);
-    if (group) {
-      return { ...parsed, kind: 'group' };
-    }
-    if (server) {
-      return { ...parsed, kind: 'server' };
-    }
-    return { ...parsed, kind: 'unknown' };
+    const systemConfig = await getSystemConfigDao().get();
+    return await describeResourceTarget(raw ?? '', getPublicResourceBase(req, systemConfig));
   } catch (error) {
     logger.warn('Failed to resolve OAuth consent resource target:', error);
-    return { ...parsed, kind: 'unknown' };
+    return raw ? { raw, path: raw, kind: 'unknown' } : undefined;
   }
+}
+
+// Mirrors resourceLabel in frontend/src/pages/OAuthConsentPage.tsx.
+const formatResourceLabel = (
+  target: ResourceTarget,
+  t: (key: string, options?: Record<string, string>) => string,
+): string => {
+  switch (target.kind) {
+    case 'all':
+      return t('oauthServer.resourceAll');
+    case 'smart':
+      return target.name
+        ? `${t('oauthServer.resourceSmart')}: ${t('oauthServer.resourceGroup', { name: target.name })}`
+        : t('oauthServer.resourceSmart');
+    case 'server':
+      return t('oauthServer.resourceServer', { name: target.name ?? '' });
+    case 'group':
+      return t('oauthServer.resourceGroup', { name: target.name ?? '' });
+    default:
+      return target.name || target.raw;
+  }
+};
+
+/**
+ * RFC 8707 §2: reject a `resource` this hub does not serve (another origin, a
+ * non-MCP path, another user's route) with invalid_target before any approval
+ * stores it. Returns false after redirecting with the error.
+ */
+async function checkAuthorizationResource(
+  req: Request,
+  res: Response,
+  resource: string | undefined,
+  redirectUri: string,
+  state: string | undefined,
+  username?: string,
+): Promise<boolean> {
+  if (!resource) return true;
+  const systemConfig = await getSystemConfigDao().get();
+  const error = getResourceAuthorizationError(
+    resource,
+    getPublicResourceBase(req, systemConfig),
+    username,
+  );
+  if (!error) return true;
+  const redirectUrl = new URL(redirectUri);
+  redirectUrl.searchParams.set('error', 'invalid_target');
+  redirectUrl.searchParams.set('error_description', error);
+  setIssuerParam(redirectUrl, await resolveIssuer(req));
+  if (state) redirectUrl.searchParams.set('state', state);
+  res.redirect(redirectUrl.toString());
+  return false;
 }
 
 /**
@@ -430,6 +499,8 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
+    if (!(await checkAuthorizationResource(req, res, resource, redirect_uri, state))) return;
+
     // Check if user is authenticated (including via JWT token)
     let user = (req as any).user;
     if (!user) {
@@ -447,6 +518,11 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       // Redirect to login page with return URL
       const returnUrl = encodeURIComponent(req.originalUrl);
       res.redirect(`/login?returnUrl=${returnUrl}`);
+      return;
+    }
+
+    const username = (user as { username?: string }).username;
+    if (!(await checkAuthorizationResource(req, res, resource, redirect_uri, state, username))) {
       return;
     }
 
@@ -475,10 +551,14 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       }
     }
 
-    const requestToken = typeof req.query.token === 'string' ? req.query.token : '';
-    const tokenField = requestToken
-      ? `<input type="hidden" name="token" value="${escapeHtml(requestToken)}">`
+    // Echo only the request-bound consent ticket into the form, never a session
+    // JWT, so the approval POST can authenticate without the dashboard token.
+    const consentTicket = readConsentTicket(req) ?? '';
+    const tokenField = consentTicket
+      ? `<input type="hidden" name="consent_ticket" value="${escapeHtml(consentTicket)}">`
       : '';
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
 
     // Get translation function from request (set by i18n middleware)
     const t = (req as any).t || ((key: string) => key);
@@ -508,6 +588,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       contacts: client.metadata?.contacts,
       applicationType: client.metadata?.application_type,
     };
+    const resourceTarget = await resolveResourceTarget(req, resource);
     const consentContext: OAuthConsentContext = {
       clientName: client.name || '',
       scopes,
@@ -518,8 +599,8 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
       state: state || undefined,
       codeChallenge: code_challenge || undefined,
       codeChallengeMethod: code_challenge_method || undefined,
-      token: requestToken || undefined,
-      resource: await resolveResourceTarget(resource),
+      consentTicket: consentTicket || undefined,
+      resource: resourceTarget,
       client: consentClientInfo,
     };
 
@@ -550,6 +631,7 @@ export const getAuthorize = async (req: Request, res: Response): Promise<void> =
           denyButtonLabel:
             t('oauthServer.buttons.denySubtitle') || 'You can always grant access later.',
           formFields,
+          resourceLabel: resourceTarget ? formatResourceLabel(resourceTarget, t) : undefined,
         },
       ),
     );
@@ -612,6 +694,20 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const resource = typeof req.body.resource === 'string' ? req.body.resource : '';
+    if (
+      !(await checkAuthorizationResource(
+        req,
+        res,
+        resource,
+        validatedRedirectUri,
+        state,
+        user.username,
+      ))
+    ) {
+      return;
+    }
+
     await authorizeAndRedirect(
       req,
       res,
@@ -619,7 +715,7 @@ export const postAuthorize = async (req: Request, res: Response): Promise<void> 
         ...user,
         approvalContext: {
           redirectUri: validatedRedirectUri,
-          resource: typeof req.body.resource === 'string' ? req.body.resource : '',
+          resource,
         },
       },
       validatedRedirectUri,
@@ -800,9 +896,11 @@ export const getProtectedResourceMetadata = async (req: Request, res: Response):
  */
 function getScopeDescription(scope: string): string {
   const descriptions: Record<string, string> = {
-    read: 'Read access to your MCP servers and tools',
-    write: 'Execute tools and modify MCP server configurations',
-    admin: 'Administrative access to all resources',
+    // Keep in sync with the enforcement in utils/oauthScope.ts. Tokens only
+    // work on MCP endpoints; no scope grants dashboard or configuration access.
+    read: 'List and read tools, prompts and resources (cannot run tools)',
+    write: 'Run tools on the MCP servers you can access',
+    admin: 'Run tools on the MCP servers you can access',
   };
-  return descriptions[scope] || 'Access to MCPHub resources';
+  return descriptions[scope] || 'Use the MCP servers you can access';
 }

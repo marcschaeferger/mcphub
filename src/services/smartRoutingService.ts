@@ -109,7 +109,8 @@ const getGroupServerConfigMap = async (
     return new Map();
   }
 
-  const serverConfigs = await getServerConfigsInGroup(targetGroup);
+  // Resolved like the router and the OAuth audience check (name, then id).
+  const serverConfigs = await getServerConfigsInGroup(targetGroup, { routeReference: true });
   return new Map(serverConfigs.map((serverConfig) => [serverConfig.name, serverConfig]));
 };
 
@@ -395,7 +396,7 @@ const getAvailableServers = async (targetGroup: string | undefined): Promise<Ser
   if (!targetGroup) {
     return servers;
   }
-  const serversInGroup = new Set(await getServersInGroup(targetGroup));
+  const serversInGroup = new Set(await getServersInGroup(targetGroup, { routeReference: true }));
   return servers.filter((server) => serversInGroup.has(server.name));
 };
 

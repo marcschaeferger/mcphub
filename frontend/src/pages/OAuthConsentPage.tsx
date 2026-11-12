@@ -41,7 +41,9 @@ const OAuthConsentPage: React.FC = () => {
         {context.codeChallengeMethod ? (
           <input type="hidden" name="code_challenge_method" value={context.codeChallengeMethod} />
         ) : null}
-        {context.token ? <input type="hidden" name="token" value={context.token} /> : null}
+        {context.consentTicket ? (
+          <input type="hidden" name="consent_ticket" value={context.consentTicket} />
+        ) : null}
         <input type="hidden" name="allow" value={allow} />
       </>
     );
@@ -52,7 +54,10 @@ const OAuthConsentPage: React.FC = () => {
       case 'all':
         return t('oauthServer.resourceAll');
       case 'smart':
-        return t('oauthServer.resourceSmart');
+        // `$smart/<group>` covers smart routing within that group only.
+        return resource.name
+          ? `${t('oauthServer.resourceSmart')}: ${t('oauthServer.resourceGroup', { name: resource.name })}`
+          : t('oauthServer.resourceSmart');
       case 'server':
         return t('oauthServer.resourceServer', { name: resource.name ?? '' });
       case 'group':
@@ -189,18 +194,20 @@ const OAuthConsentPage: React.FC = () => {
                 <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--hub-ink)' }}>
                   {resourceLabel(context.resource)}
                 </span>
-                <span
-                  className="hub-mono"
-                  style={{
-                    fontSize: 11.5,
-                    color: 'var(--hub-ink-2)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {context.resource.raw}
-                </span>
+                {context.resource.raw ? (
+                  <span
+                    className="hub-mono"
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--hub-ink-2)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {context.resource.raw}
+                  </span>
+                ) : null}
               </div>
             ) : null}
 

@@ -1,5 +1,5 @@
 import { getUserSessionVersion } from '../../src/utils/userSession.js';
-import { describe, expect, it, jest, beforeEach } from '@jest/globals';
+import { describe, expect, it, jest, beforeEach, afterEach } from '@jest/globals';
 import jwt from 'jsonwebtoken';
 import { Request, Response } from 'express';
 import { JWT_SECRET } from '../../src/config/jwt.js';
@@ -292,5 +292,55 @@ describe('sseUserContextMiddleware', () => {
 
     expect(status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  describe('session JWT in ?token=', () => {
+    const aliceToken = () =>
+      jwt.sign(
+        {
+          user: {
+            username: 'alice',
+            isAdmin: false,
+            sessionVersion: getUserSessionVersion({ username: 'alice', password: 'hashed' }),
+          },
+        },
+        JWT_SECRET,
+      );
+    const queryRequest = (token: string) =>
+      ({
+        params: { user: 'alice' },
+        header: () => undefined,
+        query: { token },
+        headers: {},
+      }) as unknown as Request;
+
+    afterEach(() => {
+      delete process.env.MCPHUB_ALLOW_QUERY_TOKEN;
+    });
+
+    it('is rejected by default so the dashboard JWT never has to sit in a URL', async () => {
+      findByUsernameMock.mockResolvedValue({ username: 'alice', password: 'hashed' });
+      const { response, status } = createResponse();
+      const next = jest.fn();
+
+      await sseUserContextMiddleware(queryRequest(aliceToken()), response, next);
+      await waitForAsyncMiddleware();
+
+      expect(status).toHaveBeenCalledWith(401);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('is accepted again with MCPHUB_ALLOW_QUERY_TOKEN=true', async () => {
+      process.env.MCPHUB_ALLOW_QUERY_TOKEN = 'true';
+      findByUsernameMock.mockResolvedValue({ username: 'alice', password: 'hashed' });
+      const { response, status } = createResponse();
+      const next = jest.fn();
+
+      await sseUserContextMiddleware(queryRequest(aliceToken()), response, next);
+      await waitForAsyncMiddleware();
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(status).not.toHaveBeenCalled();
+    });
   });
 });

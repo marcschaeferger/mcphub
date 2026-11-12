@@ -1217,6 +1217,13 @@ export const updateServer = async (req: Request, res: Response): Promise<void> =
     // Set owner property if not provided - use current user's username, default to 'admin'
     assignServerOwner(req, normalizedConfig, existingServer.owner);
 
+    // Runtime OAuth state is never taken from the request (see normalizeOAuth);
+    // keep an in-flight authorization the provider stored, so editing a server
+    // mid-authorization does not break its callback.
+    if (existingServer.oauth?.pendingAuthorization && normalizedConfig.oauth) {
+      normalizedConfig.oauth.pendingAuthorization = existingServer.oauth.pendingAuthorization;
+    }
+
     // Check if server name is being changed
     const isRenaming = newName && newName !== name;
 

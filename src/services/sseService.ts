@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
 import { canAccessGroupRoute } from '../utils/groupAccess.js';
 import {
@@ -25,15 +25,22 @@ import {
 } from '../dao/index.js';
 import { UserContextService } from './userContextService.js';
 import { RequestContextService } from './requestContextService.js';
-import { IUser, BearerKey, BearerKeyKind } from '../types/index.js';
-import { resolveOAuthUserFromToken } from '../utils/oauthBearer.js';
+import { IUser, BearerKey, BearerKeyKind, SystemConfig } from '../types/index.js';
+import { OAuthTokenGrant, resolveOAuthGrantFromToken } from '../utils/oauthBearer.js';
+import { isResourceRouteCovered, warnLegacyUnboundToken } from './oauthResourceBinding.js';
 import { bearerKeyMatches } from '../utils/bearerKeyToken.js';
 import {
   getBearerAuthHeaderValue,
   getBearerTokenFromHeaders,
   getForwardAuthTokenFromHeaders,
   parseBearerAuthorization,
+  resolveJsonBodyLimit,
 } from '../utils/bearerAuth.js';
+import {
+  OAUTH_EXECUTE_SCOPES,
+  findReadOnlyDeniedMethod,
+  isReadOnlyOAuthScope,
+} from '../utils/oauthScope.js';
 import {
   HostedAuthUnavailableError,
   isHostedApiKey,
@@ -42,7 +49,11 @@ import {
 import type { HostedAuthContext } from './hostedAuthService.js';
 import { isHostedModeEnabled } from './hostedMode.js';
 import { authenticateForwardAuthToken } from './forwardAuthService.js';
-import { getPublicResourceUrl, getResourceMetadataUrl } from '../utils/protectedResource.js';
+import {
+  getPublicResourceBase,
+  getPublicResourceUrl,
+  getResourceMetadataUrl,
+} from '../utils/protectedResource.js';
 import { logger } from '../utils/logger.js';
 import { isReplicaMode } from '../utils/replicaMode.js';
 
@@ -188,11 +199,15 @@ type BearerAuthResult =
       kind?: BearerKeyKind;
       excludedServerNames?: string[];
       hostedAuth?: HostedAuthContext;
+      /** OAuth token granted only the `read` scope (no tools/call). */
+      oauthReadOnly?: boolean;
     }
   | {
       valid: false;
-      reason: 'missing' | 'invalid' | 'forbidden' | 'unavailable';
+      reason: BearerAuthFailure;
     };
+
+type BearerAuthFailure = 'missing' | 'invalid' | 'forbidden' | 'unavailable' | 'audience';
 
 /**
  * Check if a string is a valid UUID v4 format
@@ -219,11 +234,19 @@ const normalizeBearerScopeParam = (groupParam?: string): string | undefined => {
   return groupParam;
 };
 
-const getRequestSessionId = (req: Request): string | undefined =>
-  (req.headers['mcp-session-id'] || req.query.sessionId) as string | undefined;
+// Where a transport takes its session ID from: legacy SSE POST /messages
+// delivers to `?sessionId`, Streamable HTTP to the `mcp-session-id` header. The
+// session checked must be the session served, so each handler reads only its
+// own source (a header naming another session must not pass the checks).
+type SessionIdSource = 'header' | 'query';
 
-const attachSessionGroupToRequest = (req: Request): void => {
-  const sessionId = getRequestSessionId(req);
+const getRequestSessionId = (req: Request, source: SessionIdSource): string | undefined => {
+  const value = source === 'query' ? req.query.sessionId : req.headers['mcp-session-id'];
+  return typeof value === 'string' ? value : undefined;
+};
+
+const attachSessionGroupToRequest = (req: Request, source: SessionIdSource): void => {
+  const sessionId = getRequestSessionId(req, source);
   const sessionGroup = sessionId ? transports[sessionId]?.group : undefined;
   if (sessionGroup && !req.params.group) {
     req.params.group = sessionGroup;
@@ -458,12 +481,42 @@ const resolveUserLevelKeyUser = async (req: Request, key: BearerKey): Promise<Be
 };
 
 // User routes only accept the matching user, whichever credential selected it.
-const oauthUserResult = (req: Request, user: IUser): BearerAuthResult => {
+// The token must also be bound to this route (RFC 8707 audience). Callers have
+// already restored a legacy session's group into req.params.group, so the check
+// covers the group actually served, not just the URL.
+const oauthGrantResult = async (
+  req: Request,
+  grant: OAuthTokenGrant,
+  systemConfig?: SystemConfig | null,
+): Promise<BearerAuthResult> => {
+  const { user, token } = grant;
   const requestedUsername = req.params.user;
   if (requestedUsername && requestedUsername !== user.username) {
     return { valid: false, reason: 'forbidden' };
   }
-  return { valid: true, user, keyName: OAUTH_AUTH_METHOD_LABEL };
+  if (token.resource === undefined) {
+    // Issued before audience binding: honoured until it expires (refresh binds
+    // the successor to the approval's resource when there is one).
+    warnLegacyUnboundToken(token.accessToken, token.clientId);
+  } else if (
+    !(await isResourceRouteCovered(
+      token.resource,
+      (req.params as { group?: string }).group,
+      user.username,
+      getPublicResourceBase(req, systemConfig),
+    ))
+  ) {
+    logger.warn(
+      `OAuth token for client ${token.clientId} rejected: route is outside its resource binding`,
+    );
+    return { valid: false, reason: 'audience' };
+  }
+  return {
+    valid: true,
+    user,
+    keyName: OAUTH_AUTH_METHOD_LABEL,
+    oauthReadOnly: isReadOnlyOAuthScope(token.scope),
+  };
 };
 
 const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
@@ -567,10 +620,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
       return matchingKey.kind === 'user' ? { valid: false, reason: 'invalid' } : { valid: true };
     }
 
-    const oauthUser = await resolveOAuthUserFromToken(token);
-    if (oauthUser) {
+    const oauthGrant = await resolveOAuthGrantFromToken(token);
+    if (oauthGrant) {
       logger.log('Recognized OAuth bearer token (auth disabled)');
-      return oauthUserResult(req, oauthUser);
+      return oauthGrantResult(req, oauthGrant, systemConfig);
     }
 
     return { valid: true };
@@ -586,10 +639,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
   }
 
   if (enabledKeys.length === 0) {
-    const oauthUser = await resolveOAuthUserFromToken(token);
-    if (oauthUser) {
+    const oauthGrant = await resolveOAuthGrantFromToken(token);
+    if (oauthGrant) {
       logger.log('Authenticated request using OAuth bearer token without configured keys');
-      return oauthUserResult(req, oauthUser);
+      return oauthGrantResult(req, oauthGrant, systemConfig);
     }
 
     logger.warn(
@@ -618,10 +671,10 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
     return attachExcludedServerNames(matchingKey, userKeyResult);
   }
 
-  const oauthUser = await resolveOAuthUserFromToken(token);
-  if (oauthUser) {
+  const oauthGrant = await resolveOAuthGrantFromToken(token);
+  if (oauthGrant) {
     logger.log('Authenticated request using OAuth bearer token (no matching static key)');
-    return oauthUserResult(req, oauthUser);
+    return oauthGrantResult(req, oauthGrant, systemConfig);
   }
 
   logger.warn('Bearer authentication failed: token did not match any key or OAuth user');
@@ -632,9 +685,9 @@ const validateBearerAuth = async (req: Request): Promise<BearerAuthResult> => {
 const authorizeGroupRoute = async (
   req: Request,
   res: Response,
-  legacySession = true,
+  sessionSource: SessionIdSource | false,
 ): Promise<boolean> => {
-  const sessionId = legacySession ? getRequestSessionId(req) : undefined;
+  const sessionId = sessionSource ? getRequestSessionId(req, sessionSource) : undefined;
   const session = sessionId ? transports[sessionId] : undefined;
   if (session && !(await groupRouteReferencesMatch(req.params.group, session.group))) {
     res.status(403).json({ error: 'forbidden', error_description: 'Session route mismatch' });
@@ -683,7 +736,7 @@ const escapeHeaderValue = (value: string): string => {
 const sendBearerAuthError = async (
   req: Request,
   res: Response,
-  reason: 'missing' | 'invalid' | 'forbidden' | 'unavailable',
+  reason: BearerAuthFailure,
 ): Promise<void> => {
   if (reason === 'forbidden') {
     res.status(403).json({
@@ -703,7 +756,11 @@ const sendBearerAuthError = async (
   }
 
   const errorDescription =
-    reason === 'missing' ? 'No authorization provided' : 'Invalid bearer token';
+    reason === 'missing'
+      ? 'No authorization provided'
+      : reason === 'audience'
+        ? 'The access token is not valid for this resource'
+        : 'Invalid bearer token';
 
   const systemConfig = await getSystemConfigDao().get();
   const resourceMetadataUrl = getResourceMetadataUrl(getPublicResourceUrl(req, systemConfig));
@@ -716,11 +773,13 @@ const sendBearerAuthError = async (
     headerParts.push(`resource_metadata="${escapeHeaderValue(resourceMetadataUrl)}"`);
   }
 
-  logger.warn(
-    reason === 'missing'
-      ? 'Bearer authentication required but no authorization header was provided'
-      : 'Bearer authentication failed due to invalid bearer token',
-  );
+  if (reason !== 'audience') {
+    logger.warn(
+      reason === 'missing'
+        ? 'Bearer authentication required but no authorization header was provided'
+        : 'Bearer authentication failed due to invalid bearer token',
+    );
+  }
 
   res.setHeader('WWW-Authenticate', `Bearer ${headerParts.join(', ')}`);
 
@@ -737,7 +796,72 @@ const sendBearerAuthError = async (
     responseBody.resource_metadata = resourceMetadataUrl;
   }
 
-  res.status(401).json(responseBody);
+  // An audience mismatch is a valid token used on the wrong resource: 403, so
+  // the client neither retries the same token nor treats it as expired.
+  res.status(reason === 'audience' ? 403 : 401).json(responseBody);
+};
+
+/**
+ * Enforce the OAuth `read` scope on a JSON-RPC body (message or batch, checked
+ * per message). A denied request gets HTTP 403 with
+ * `WWW-Authenticate: Bearer error="insufficient_scope"` and the scope that is
+ * needed, which MCP clients use for step-up authorization; a JSON-RPC error
+ * would be indistinguishable from a tool failure and give the client no way to
+ * obtain a sufficient token.
+ */
+const enforceOAuthScope = async (
+  req: Request,
+  res: Response,
+  result: BearerAuthResult,
+  body: unknown,
+): Promise<boolean> => {
+  if (!result.valid || !result.oauthReadOnly) return true;
+  const denied = findReadOnlyDeniedMethod(body);
+  if (!denied) return true;
+
+  const systemConfig = await getSystemConfigDao().get();
+  const allowedScopes = systemConfig?.oauthServer?.allowedScopes ?? ['read', 'write'];
+  const requiredScope =
+    OAUTH_EXECUTE_SCOPES.find((scope) => allowedScopes.includes(scope)) ?? 'write';
+  const description = `The access token only grants read access; ${denied} requires the ${requiredScope} scope`;
+  const headerParts = [
+    'error="insufficient_scope"',
+    `scope="${escapeHeaderValue(requiredScope)}"`,
+    `error_description="${escapeHeaderValue(description)}"`,
+  ];
+  const resourceMetadataUrl = getResourceMetadataUrl(getPublicResourceUrl(req, systemConfig));
+  if (resourceMetadataUrl) {
+    headerParts.push(`resource_metadata="${escapeHeaderValue(resourceMetadataUrl)}"`);
+  }
+  logger.warn(`OAuth token rejected: ${denied} needs the ${requiredScope} scope`);
+  res.setHeader('WWW-Authenticate', `Bearer ${headerParts.join(', ')}`);
+  res.status(403).json({ error: 'insufficient_scope', error_description: description });
+  return false;
+};
+
+// Legacy SSE message bodies are not parsed by the global JSON middleware (the
+// transport reads the stream). Parse them here when the scope must be checked.
+const readSseMessageBody = async (
+  req: Request,
+  res: Response,
+): Promise<{ ok: true; body: unknown } | { ok: false }> => {
+  if (!req.is('application/json')) return { ok: true, body: undefined };
+  const systemConfig = await getSystemConfigDao().get();
+  try {
+    await new Promise<void>((resolve, reject) =>
+      express.json({ limit: resolveJsonBodyLimit(systemConfig) })(req, res, (error?: unknown) =>
+        error ? reject(error) : resolve(),
+      ),
+    );
+  } catch {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error' },
+      id: null,
+    });
+    return { ok: false };
+  }
+  return { ok: true, body: req.body };
 };
 
 export const handleSseConnection = async (req: Request, res: Response): Promise<void> => {
@@ -752,7 +876,7 @@ export const handleSseConnection = async (req: Request, res: Response): Promise<
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'header'))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
@@ -820,7 +944,7 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   // (no :group param), so isBearerKeyAllowedForRequest would see an empty paramValue
   // and reject the key with 401. Injecting the group here lets the validator use
   // the correct scope from the already-authenticated session.
-  attachSessionGroupToRequest(req);
+  attachSessionGroupToRequest(req, 'query');
 
   // Check bearer auth using filtered settings
   const bearerAuthResult = await validateBearerAuth(req);
@@ -830,12 +954,21 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'query'))) return;
+
+  let parsedBody: unknown;
+  if (bearerAuthResult.oauthReadOnly) {
+    const parsed = await readSseMessageBody(req, res);
+    if (!parsed.ok) return;
+    parsedBody = parsed.body;
+    if (!(await enforceOAuthScope(req, res, bearerAuthResult, parsedBody))) return;
+  }
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
 
-  const sessionId = req.query.sessionId as string;
+  // The session checked above is the one delivered to (query only).
+  const sessionId = getRequestSessionId(req, 'query');
 
   // Validate sessionId
   if (!sessionId) {
@@ -875,7 +1008,11 @@ export const handleSseMessage = async (req: Request, res: Response): Promise<voi
       bearerAuthResult.excludedServerNames ?? excludedServerNames,
     );
 
-    await (transport as SSEServerTransport).handlePostMessage(req, res);
+    const sseTransport = transport as SSEServerTransport;
+    // A body parsed for the scope check is consumed; hand it to the transport.
+    await (parsedBody === undefined
+      ? sseTransport.handlePostMessage(req, res)
+      : sseTransport.handlePostMessage(req, res, parsedBody));
   });
 };
 
@@ -977,7 +1114,7 @@ export const handleMcpPostRequest = async (req: Request, res: Response): Promise
   const legacyRequest = await isLegacyRequest(webRequest, req.body);
   if (legacyRequest) {
     // Legacy clients may continue a group session through the global route.
-    attachSessionGroupToRequest(req);
+    attachSessionGroupToRequest(req, 'header');
   }
 
   // Check bearer auth using filtered settings
@@ -988,7 +1125,8 @@ export const handleMcpPostRequest = async (req: Request, res: Response): Promise
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res, legacyRequest))) return;
+  if (!(await authorizeGroupRoute(req, res, legacyRequest ? 'header' : false))) return;
+  if (!(await enforceOAuthScope(req, res, bearerAuthResult, req.body))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;
@@ -1195,7 +1333,7 @@ export const handleMcpOtherRequest = async (req: Request, res: Response) => {
 
   // Streamable HTTP clients may continue an existing session on the global route.
   // Reuse the session's group before bearer-scope validation in that case.
-  attachSessionGroupToRequest(req);
+  attachSessionGroupToRequest(req, 'header');
 
   // Check bearer auth using filtered settings
   const bearerAuthResult = await validateBearerAuth(req);
@@ -1205,7 +1343,7 @@ export const handleMcpOtherRequest = async (req: Request, res: Response) => {
   }
 
   attachUserContextFromBearer(bearerAuthResult, res);
-  if (!(await authorizeGroupRoute(req, res))) return;
+  if (!(await authorizeGroupRoute(req, res, 'header'))) return;
 
   const currentUser = userContextService.getCurrentUser();
   const username = currentUser?.username;

@@ -141,7 +141,9 @@ describe('smartRoutingService group server alias', () => {
         const search = await handleSearchToolsRequest('fetch', 10, '');
         expect(JSON.parse(search.content[0].text).tools[0].name).toBe('fetch::fetch_url');
         await handleDescribeToolRequest('fetch::fetch_url', '');
-        expect(mockGetServerConfigsInGroup).toHaveBeenCalledWith('team-a');
+        expect(mockGetServerConfigsInGroup).toHaveBeenCalledWith('team-a', {
+          routeReference: true,
+        });
         expect(mockGetServerConfigsInGroup).not.toHaveBeenCalledWith('wrong-group');
         expect(mockGetGroup).not.toHaveBeenCalled();
       },

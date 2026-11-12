@@ -8,6 +8,8 @@ import { getToken } from '../services/authService';
 import { getPublicConfig } from '../services/configService';
 import { createBetterAuthClient, startOidcLogin } from '../services/betterAuthClient';
 import { getBasePath } from '../utils/runtime';
+import { apiPost } from '../utils/fetchInterceptor';
+import { buildOAuthConsentRedirect } from '../utils/oauthConsentRedirect';
 import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
@@ -76,29 +78,41 @@ const LoginPage: React.FC = () => {
     );
   }, []);
 
-  const buildRedirectTarget = useCallback(() => {
+  const buildRedirectTarget = useCallback(async () => {
     if (!returnUrl) return '/';
     if (!returnUrl.startsWith('/oauth/authorize')) return returnUrl;
-    const token = getToken();
-    if (!token) return returnUrl;
-    try {
-      const origin = window.location.origin;
-      const url = new URL(returnUrl, origin);
-      url.searchParams.set('token', token);
-      return `${url.pathname}${url.search}${url.hash}`;
-    } catch {
-      const separator = returnUrl.includes('?') ? '&' : '?';
-      return `${returnUrl}${separator}token=${encodeURIComponent(token)}`;
-    }
+    // Better Auth sessions authenticate /oauth/authorize with their cookie.
+    if (!getToken()) return returnUrl;
+    return buildOAuthConsentRedirect(
+      returnUrl,
+      window.location.origin,
+      async (clientId, redirectUri) => {
+        const result = await apiPost<{ success: boolean; data?: { ticket?: string } }>(
+          '/url-tickets',
+          { purpose: 'oauth-consent', client_id: clientId, redirect_uri: redirectUri },
+        );
+        if (!result.success || !result.data?.ticket) {
+          throw new Error('Failed to create OAuth consent ticket');
+        }
+        return result.data.ticket;
+      },
+    );
   }, [returnUrl]);
 
-  const redirectAfterLogin = useCallback(() => {
-    if (returnUrl) {
-      window.location.assign(buildRedirectTarget());
-    } else {
+  const redirectAfterLogin = useCallback(async () => {
+    if (!returnUrl) {
       navigate('/');
+      return;
     }
-  }, [buildRedirectTarget, navigate, returnUrl]);
+    try {
+      window.location.assign(await buildRedirectTarget());
+    } catch (redirectError) {
+      // Do not navigate without a credential: /oauth/authorize would bounce back
+      // here and loop.
+      console.error('OAuth consent redirect failed', redirectError);
+      setError(t('auth.loginError'));
+    }
+  }, [buildRedirectTarget, navigate, returnUrl, t]);
 
   useEffect(() => {
     if (!auth.loading && auth.isAuthenticated) redirectAfterLogin();
@@ -239,11 +253,7 @@ const LoginPage: React.FC = () => {
 
       {/* Subtle grid pattern (kept low-key, hair-line) */}
       <div className="pointer-events-none absolute inset-0 -z-10">
-        <svg
-          className="h-full w-full"
-          style={{ opacity: 0.5 }}
-          xmlns="http://www.w3.org/2000/svg"
-        >
+        <svg className="h-full w-full" style={{ opacity: 0.5 }} xmlns="http://www.w3.org/2000/svg">
           <defs>
             <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
               <path
@@ -316,11 +326,7 @@ const LoginPage: React.FC = () => {
             {!passwordLoginDisabled && (
               <form className="space-y-3" onSubmit={handleSubmit}>
                 <div>
-                  <label
-                    htmlFor="username"
-                    className="hub-sect block"
-                    style={{ marginBottom: 6 }}
-                  >
+                  <label htmlFor="username" className="hub-sect block" style={{ marginBottom: 6 }}>
                     {t('auth.username')}
                   </label>
                   <input
@@ -336,11 +342,7 @@ const LoginPage: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label
-                    htmlFor="password"
-                    className="hub-sect block"
-                    style={{ marginBottom: 6 }}
-                  >
+                  <label htmlFor="password" className="hub-sect block" style={{ marginBottom: 6 }}>
                     {t('auth.password')}
                   </label>
                   <input
@@ -377,7 +379,8 @@ const LoginPage: React.FC = () => {
                 )}
 
                 {formError && (
-                  <div role="alert"
+                  <div
+                    role="alert"
                     className="flex items-center gap-2"
                     style={{
                       padding: '8px 10px',
@@ -462,9 +465,7 @@ const LoginPage: React.FC = () => {
                       className="hub-btn w-full justify-center"
                       style={{ height: 34 }}
                     >
-                      {socialLoading === 'google'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithGoogle')}
+                      {socialLoading === 'google' ? t('auth.loggingIn') : t('auth.loginWithGoogle')}
                     </button>
                   )}
                   {socialProviders.github && (
@@ -481,9 +482,7 @@ const LoginPage: React.FC = () => {
                       }}
                     >
                       <GitHubIcon className="h-3.5 w-3.5" />
-                      {socialLoading === 'github'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithGithub')}
+                      {socialLoading === 'github' ? t('auth.loggingIn') : t('auth.loginWithGithub')}
                     </button>
                   )}
                   {socialProviders.oidc && (
@@ -494,9 +493,7 @@ const LoginPage: React.FC = () => {
                       className="hub-btn w-full justify-center"
                       style={{ height: 34 }}
                     >
-                      {socialLoading === 'oidc'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithOIDC')}
+                      {socialLoading === 'oidc' ? t('auth.loggingIn') : t('auth.loginWithOIDC')}
                     </button>
                   )}
                 </div>
@@ -504,10 +501,7 @@ const LoginPage: React.FC = () => {
             )}
           </div>
 
-          <p
-            className="text-center hub-mono"
-            style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}
-          >
+          <p className="text-center hub-mono" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}>
             v{import.meta.env.PACKAGE_VERSION}
           </p>
         </div>

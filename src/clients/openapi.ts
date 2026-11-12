@@ -8,11 +8,7 @@ import { CookieJar } from 'tough-cookie';
 import SwaggerParser from '@apidevtools/swagger-parser';
 import * as yaml from 'js-yaml';
 import { OpenAPIV3 } from 'openapi-types';
-import {
-  ServerConfig,
-  OpenAPISecurityConfig,
-  OpenAPIDeclaredSecurity,
-} from '../types/index.js';
+import { ServerConfig, OpenAPISecurityConfig, OpenAPIDeclaredSecurity } from '../types/index.js';
 import {
   assertSafeUrl,
   UnsafeUrlError,
@@ -20,7 +16,12 @@ import {
   ssrfConnectionOptions,
 } from '../utils/ssrf.js';
 import { getUserDao } from '../dao/index.js';
-import { sanitizeStringForLogging, createSafeJSON } from '../utils/serialization.js';
+import {
+  sanitizeStringForLogging,
+  createSafeJSON,
+  type SafeJsonBudget,
+} from '../utils/serialization.js';
+import { readResponseTextWithLimit } from '../utils/boundedResponse.js';
 import {
   buildMultipartParts,
   encodeFormUrlEncoded,
@@ -29,6 +30,26 @@ import {
   serializeMultipartBody,
   type RequestBodyContentSelection,
 } from '../utils/openApiRequestBody.js';
+
+const DEFAULT_OPENAPI_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+
+// Upper bound for OpenAPI spec downloads, external $ref documents and tool
+// responses. Override with OPENAPI_MAX_RESPONSE_BYTES.
+const resolveOpenApiMaxResponseBytes = (): number => {
+  const parsed = Number.parseInt(process.env.OPENAPI_MAX_RESPONSE_BYTES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OPENAPI_MAX_RESPONSE_BYTES;
+};
+
+const DEFAULT_OPENAPI_MAX_SCHEMA_NODES = 2_000_000;
+
+// Upper bound on the number of JSON values generated for all tool input schemas
+// of one spec. Dereferenced $refs are shared objects, so a ~3 KB spec of chained
+// components can otherwise expand to gigabytes and block/OOM the hub. Override
+// with OPENAPI_MAX_SCHEMA_NODES.
+const resolveOpenApiMaxSchemaNodes = (): number => {
+  const parsed = Number.parseInt(process.env.OPENAPI_MAX_SCHEMA_NODES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_OPENAPI_MAX_SCHEMA_NODES;
+};
 
 export interface OpenAPIToolInfo {
   name: string;
@@ -206,9 +227,15 @@ export class OpenAPIClient {
   // cross origins), OpenAPI array query serialization, and operator-supplied
   // static headers.
   private createHttpClient(config: ServerConfig): AxiosInstance {
+    const maxBytes = resolveOpenApiMaxResponseBytes();
     return axios.create({
       timeout: config.options?.timeout || 30000,
       maxRedirects: 0,
+      // axios buffers responses without limit by default on Node. Spec downloads
+      // and tool responses come from servers a non-admin may point at, so an
+      // endless (chunked) body must not be able to exhaust the hub's memory.
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes,
       // Serialize array query params per OpenAPI's default `style: form, explode: true`
       // (`id=a&id=b`) instead of axios's bracket form `id[]=a&id[]=b` (#1080).
       paramsSerializer: { indexes: null },
@@ -580,8 +607,16 @@ export class OpenAPIClient {
               this.allowInternalNetworks,
             );
             const response = await safeFetch(safeRefUrl, { method: 'GET', headers: {} });
-            const buf = await response.arrayBuffer();
-            return new TextDecoder().decode(buf);
+            const text = await readResponseTextWithLimit(
+              response,
+              resolveOpenApiMaxResponseBytes(),
+            );
+            if (text === undefined) {
+              throw new Error(
+                `External $ref exceeds the size limit: ${sanitizeStringForLogging(safeRefUrl)}`,
+              );
+            }
+            return text;
           },
         },
         file: {
@@ -659,6 +694,7 @@ export class OpenAPIClient {
   }
 
   private extractTools(): void {
+    const schemaBudget: SafeJsonBudget = { remaining: resolveOpenApiMaxSchemaNodes() };
     if (!this.spec?.paths) {
       return;
     }
@@ -737,6 +773,7 @@ export class OpenAPIClient {
           // embeddings) throws "Converting circular structure to JSON". See #959.
           inputSchema: createSafeJSON(
             this.generateInputSchema(operation, path, method as string, requestBodySelection),
+            schemaBudget,
           ),
           operationId: operation.operationId || operationName,
           method: method as string,
@@ -1085,7 +1122,8 @@ export class OpenAPIClient {
           this.captureResponseCookies(error.response, resolvedTarget.href, sessionId);
         }
         if (
-          !isReplicaMode() && attemptedUpstreamRequest &&
+          !isReplicaMode() &&
+          attemptedUpstreamRequest &&
           error.response?.status === 401 &&
           !hasRetriedAfterUnauthorized &&
           authorizationUsedForRequest &&
@@ -1095,7 +1133,8 @@ export class OpenAPIClient {
         }
 
         if (
-          !isReplicaMode() && attemptedUpstreamRequest &&
+          !isReplicaMode() &&
+          attemptedUpstreamRequest &&
           error.response?.status === 401 &&
           !hasRetriedAfterUnauthorized &&
           (await this.invalidateRefreshableOAuth2Token())
@@ -1223,10 +1262,7 @@ export class OpenAPIClient {
           // Unknown name or an unresolved reference — try the next alternative.
           continue;
         }
-        const mapped = this.mapSecurityScheme(
-          schemeName,
-          scheme as OpenAPIV3.SecuritySchemeObject,
-        );
+        const mapped = this.mapSecurityScheme(schemeName, scheme as OpenAPIV3.SecuritySchemeObject);
         if (mapped.ok) {
           return {
             declared: true,

@@ -22,6 +22,8 @@ function resolveDevConfiguration(env = process.env) {
     childEnvironment: {
       ...env,
       NODE_ENV: env.NODE_ENV || 'development',
+      // Opt in to the well-known admin/admin123 bootstrap user for local dev only.
+      MCPHUB_DEV_DEFAULT_ADMIN: env.MCPHUB_DEV_DEFAULT_ADMIN || '1',
       MCPHUB_SETTING_PATH: settingsPath,
     },
     settingsPath,

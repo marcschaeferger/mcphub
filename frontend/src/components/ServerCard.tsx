@@ -36,6 +36,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useAuth } from '@/contexts/AuthContext';
 import { canManageServer } from '@/utils/serverPermissions';
+import { toSafeAuthorizationUrl } from '@/utils/oauthUrl';
 import {
   getServerVisibilityDisplay,
   getServerVisibilityOptions,
@@ -322,12 +323,13 @@ const ServerCard = ({
 
   const handleOAuth = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (server.oauth?.authorizationUrl) {
+    const authorizationUrl = toSafeAuthorizationUrl(server.oauth?.authorizationUrl);
+    if (server.oauth && authorizationUrl) {
       const w = 600;
       const h = 700;
       const left = window.screen.width / 2 - w / 2;
       const top = window.screen.height / 2 - h / 2;
-      window.open(server.oauth.authorizationUrl, 'OAuth Authorization', `width=${w},height=${h},left=${left},top=${top}`);
+      window.open(authorizationUrl, 'OAuth Authorization', `width=${w},height=${h},left=${left},top=${top}`);
       showToast(t('status.oauthWindowOpened'), 'info');
       // When a static clientId is configured, the provider's OAuth client is registered
       // with its own redirect-URI allow-list, which often excludes this hub's callback and

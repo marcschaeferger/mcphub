@@ -58,6 +58,7 @@ jest.mock('../../src/dao/index.js', () => ({
   getSystemConfigDao: () => ({
     get: async () => ({
       oauthServer: { enabled: true, alwaysShowApprovalScreen, allowedScopes, requireState },
+      install: { baseUrl: 'https://hub.example' },
     }),
   }),
 }));
@@ -65,6 +66,7 @@ jest.mock('../../src/dao/DaoFactory.js', () => ({
   getSystemConfigDao: () => ({
     get: async () => ({
       oauthServer: { enabled: true, alwaysShowApprovalScreen, allowedScopes, requireState },
+      install: { baseUrl: 'https://hub.example' },
     }),
   }),
 }));
@@ -95,6 +97,7 @@ import {
 } from '../../src/controllers/oauthServerController.js';
 import { initOAuthServer, generateCodeChallenge } from '../../src/services/oauthServerService.js';
 import { getUserSessionVersion } from '../../src/utils/userSession.js';
+import { issueUrlTicket } from '../../src/utils/urlTicket.js';
 
 describe('OAuth remembered consent', () => {
   let app: express.Application;
@@ -140,12 +143,12 @@ describe('OAuth remembered consent', () => {
   });
 
   it('issues a fresh code on a previously approved request and preserves state and PKCE', async () => {
-    expect((await request(app).get('/oauth/authorize').query(authorization())).status).toBe(200);
+    expect((await authorize()).status).toBe(200);
     const first = await request(app)
       .post('/oauth/authorize')
       .send({ ...authorization(), allow: 'true' });
     expect(first.status).toBe(302);
-    const second = await request(app).get('/oauth/authorize').query(authorization());
+    const second = await authorize();
     expect(second.status).toBe(302);
     const callback = new URL(second.headers.location);
     expect(callback.searchParams.get('state')).toBe('client-state');
@@ -169,10 +172,13 @@ describe('OAuth remembered consent', () => {
     request(app)
       .post('/oauth/authorize')
       .send({ ...authorization(), ...overrides, allow: 'true' });
-  const authorize = (overrides = {}) =>
-    request(app)
-      .get('/oauth/authorize')
-      .query({ ...authorization(), ...overrides });
+  // The session JWT is sent as a header: /oauth/authorize no longer accepts it
+  // from the query string (it leaked into logs and history).
+  const authorize = (overrides: Record<string, string> = {}) => {
+    const { token, ...params } = { ...authorization(), ...overrides };
+    const pending = request(app).get('/oauth/authorize').query(params);
+    return token ? pending.set('x-auth-token', token) : pending;
+  };
   const exchange = (response: request.Response, verifierValue = verifier) =>
     request(app)
       .post('/oauth/token')
@@ -340,5 +346,50 @@ describe('OAuth remembered consent', () => {
           .auth(pair.body.access_token, { type: 'bearer' })
       ).status,
     ).toBe(401);
+  });
+
+  it('never takes the session JWT from the URL; accepts a request-bound consent ticket', async () => {
+    alwaysShowApprovalScreen = true;
+    const { token, ...params } = authorization();
+    // Session JWT in the query string: ignored (it leaked into logs/history).
+    const viaQuery = await request(app)
+      .get('/oauth/authorize')
+      .query({ ...params, token });
+    expect(viaQuery.status).toBe(302);
+    expect(viaQuery.headers.location).toMatch(/^\/login/);
+
+    const ticket = issueUrlTicket(users[0], 'oauth-consent', {
+      client_id: client.clientId,
+      redirect_uri: client.redirectUris[0],
+    });
+    const viaTicket = await request(app)
+      .get('/oauth/authorize')
+      .query({ ...params, consent_ticket: ticket });
+    expect(viaTicket.status).toBe(200);
+    expect(viaTicket.headers['referrer-policy']).toBe('no-referrer');
+    expect(viaTicket.headers['cache-control']).toBe('no-store');
+    expect(viaTicket.text).not.toContain(token);
+
+    // The ticket only works for the client and redirect URI it was issued for.
+    const otherClientTicket = issueUrlTicket(users[0], 'oauth-consent', {
+      client_id: 'other-client',
+      redirect_uri: client.redirectUris[0],
+    });
+    const mismatched = await request(app)
+      .get('/oauth/authorize')
+      .query({ ...params, consent_ticket: otherClientTicket });
+    expect(mismatched.headers.location).toMatch(/^\/login/);
+
+    // A consent ticket is never a dashboard session.
+    expect(
+      (await request(app).get('/api/oauth/approvals').set('x-auth-token', ticket)).status,
+    ).toBe(401);
+
+    // The approval POST authenticates with the ticket from the consent form.
+    const approved = await request(app)
+      .post('/oauth/authorize')
+      .send({ ...params, consent_ticket: ticket, allow: 'true' });
+    expect(approved.status).toBe(302);
+    expect(new URL(approved.headers.location).searchParams.get('code')).toBeTruthy();
   });
 });

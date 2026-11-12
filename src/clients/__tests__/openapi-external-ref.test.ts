@@ -108,12 +108,28 @@ describe('OpenAPIClient - SSRF guard on external $ref resolution', () => {
     expect((fetchMock.mock.calls[0][1] as { headers: unknown }).headers).toEqual({});
   });
 
+  it('rejects an external $ref document larger than OPENAPI_MAX_RESPONSE_BYTES', async () => {
+    process.env.OPENAPI_MAX_RESPONSE_BYTES = '1024';
+    try {
+      const client = makeSchemaClient('http://93.184.216.34/ext.json#/schemas/Secret');
+      fetchMock.mockResolvedValue(
+        refFetchResponse(
+          JSON.stringify({
+            schemas: { Secret: { type: 'object', description: 'x'.repeat(4096) } },
+          }),
+        ),
+      );
+      // The oversized document is never embedded (the parser then falls through to
+      // the file resolver, which refuses it as well).
+      await expect(client.initialize()).rejects.toThrow();
+    } finally {
+      delete process.env.OPENAPI_MAX_RESPONSE_BYTES;
+    }
+  });
+
   it('allows an internal-host $ref for admin-owned servers', async () => {
     findByUsername.mockResolvedValue({ isAdmin: true });
-    const client = makeSchemaClient(
-      'http://127.0.0.1:8081/internal.json#/schemas/Secret',
-      'boss',
-    );
+    const client = makeSchemaClient('http://127.0.0.1:8081/internal.json#/schemas/Secret', 'boss');
     fetchMock.mockResolvedValue(
       refFetchResponse(JSON.stringify({ schemas: { Secret: { type: 'object' } } })),
     );

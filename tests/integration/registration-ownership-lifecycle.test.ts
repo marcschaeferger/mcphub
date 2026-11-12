@@ -45,6 +45,8 @@ it('keeps a deleted private-server owner unavailable to public registration acro
     clearSettingsCache();
     expect(await isRegistrationUsernameReserved('alice')).toBe(true);
     expect(await isRegistrationUsernameReserved('new-user')).toBe(false);
+    // Email-shaped names are reserved for SSO identities (account pre-hijacking).
+    expect(await isRegistrationUsernameReserved('alice@corp.com')).toBe(true);
   } finally {
     if (originalSettingsPath === undefined) delete process.env.MCPHUB_SETTING_PATH;
     else process.env.MCPHUB_SETTING_PATH = originalSettingsPath;

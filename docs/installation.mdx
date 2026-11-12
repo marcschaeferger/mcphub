@@ -100,11 +100,11 @@ Optional for Smart Routing:
         environment:
           POSTGRES_DB: mcphub
           POSTGRES_USER: mcphub
-          POSTGRES_PASSWORD: mcphub_password
+          POSTGRES_PASSWORD: change-me-strong-password
         volumes:
           - postgres_data:/var/lib/postgresql/data
         ports:
-          - "5432:5432"
+          - "127.0.0.1:5432:5432"
 
     volumes:
       postgres_data:
@@ -421,7 +421,7 @@ Smart Routing provides AI-powered tool discovery using vector semantic search.
       -e POSTGRES_DB=mcphub \
       -e POSTGRES_USER=mcphub \
       -e POSTGRES_PASSWORD=your_password \
-      -p 5432:5432 \
+      -p 127.0.0.1:5432:5432 \
       pgvector/pgvector:pg17
     ```
   </Tab>

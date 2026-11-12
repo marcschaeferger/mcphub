@@ -31,6 +31,10 @@ The image defaults to `/app/data/mcp_settings.json`. Mount the entire data direc
 
 Existing file mounts at `/app/mcp_settings.json` are detected automatically and take precedence over the data directory, so existing Docker commands keep working. An explicit `MCPHUB_SETTING_PATH` always takes precedence over both locations. For full persistence, migrate the settings file and its existing `.credentials.json` and `.credentials.key` sidecars together into the mounted data directory. Explicit `MCPHUB_SETTING_PATH` values remain supported.
 
+#### Unprivileged user
+
+MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container starts as root only long enough to hand root-owned data (volumes written by older images, or `./data` directories created by Docker) over to that user. Files owned by a host user are never changed: if `/app/data` or the settings file and its sidecars are not writable for uid `10001` (for example a host-owned file mounted at `/app/mcp_settings.json`), MCPHub keeps running as root as before and logs a warning. To run unprivileged, keep the settings in the data directory and `chown -R 10001:10001` it. Set `MCPHUB_RUN_AS_ROOT=true` to always run as root. On platforms that forbid root (Kubernetes `runAsNonRoot`), start the container as `--user 10001:10001` / `runAsUser: 10001` with a data directory that uid `10001` can write. The `full` image keeps running as root because it starts the Docker daemon.
+
 ### Building from Source
 
 ```bash
@@ -142,7 +146,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U mcphub -d mcphub']
       interval: 10s
@@ -401,7 +405,7 @@ services:
       - POSTGRES_USER=mcphub
       - POSTGRES_PASSWORD=password
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
     networks:

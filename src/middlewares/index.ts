@@ -26,6 +26,30 @@ export const errorHandler = (
   });
 };
 
+/**
+ * Whether the global JSON parser handles `path`. Legacy SSE transports read
+ * their own stream (`/sse`, `/messages`, `/:user/sse`, `/:user/messages`).
+ * `/mcp/:group` is registered before those user-scoped routes, so `/mcp/sse`
+ * and `/mcp/messages` are MCP requests for a group or server named `sse` or
+ * `messages` and need their body parsed (e.g. for the OAuth scope check).
+ */
+export const shouldParseJsonBody = (
+  path: string,
+  basePath: string,
+  betterAuthPath: string,
+): boolean => {
+  if (path.startsWith(betterAuthPath)) return false;
+  if (path === `${basePath}/mcp` || path.startsWith(`${basePath}/mcp/`)) return true;
+  const escapedBasePath = basePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return !(
+    path === `${basePath}/sse` ||
+    path.startsWith(`${basePath}/sse/`) ||
+    path === `${basePath}/messages` ||
+    new RegExp(`^${escapedBasePath}/[^/]+/messages$`).test(path) ||
+    new RegExp(`^${escapedBasePath}/[^/]+/sse(/.*)?$`).test(path)
+  );
+};
+
 export const initMiddlewares = (app: express.Application): void => {
   // Apply i18n middleware first to detect language for all requests
   app.use(i18nMiddleware);
@@ -47,18 +71,7 @@ export const initMiddlewares = (app: express.Application): void => {
       const betterAuthConfig = await getBetterAuthRuntimeConfig(systemConfig);
       const betterAuthPath = `${basePath}${betterAuthConfig.basePath}`;
 
-      if (
-        !req.path.startsWith(betterAuthPath) &&
-        req.path !== `${basePath}/sse` &&
-        !req.path.startsWith(`${basePath}/sse/`) &&
-        req.path !== `${basePath}/messages` &&
-        !req.path.match(
-          new RegExp(`^${basePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[^/]+/messages$`),
-        ) &&
-        !req.path.match(
-          new RegExp(`^${basePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[^/]+/sse(/.*)?$`),
-        )
-      ) {
+      if (shouldParseJsonBody(req.path, basePath, betterAuthPath)) {
         const jsonBodyLimit = resolveJsonBodyLimit(systemConfig);
         express.json({ limit: jsonBodyLimit })(req, res, next);
         return;

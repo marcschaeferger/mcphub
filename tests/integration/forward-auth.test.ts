@@ -39,6 +39,11 @@ jest.mock('../../src/utils/oauthBearer.js', () => {
     resolveOAuthUserFromToken: jest.fn(async (presented?: string) =>
       presented === token ? user : actual.resolveOAuthUserFromToken(presented),
     ),
+    resolveOAuthGrantFromToken: jest.fn(async (presented?: string) =>
+      presented === token
+        ? { user, token: { accessToken: token, clientId: 'client', resource: '' } }
+        : actual.resolveOAuthGrantFromToken(presented),
+    ),
     resolveOAuthUserFromHeaders: jest.fn(
       async (headers: Record<string, unknown>, config: unknown) =>
         headers.authorization === `Bearer ${token}`

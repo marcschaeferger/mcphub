@@ -15,7 +15,7 @@ This fork carries security changes that are not yet upstream:
 | Dependencies | MCP SDK 2.4.0 with a rebased client patch; `pnpm.overrides` pin transitive dependencies to fixed versions |
 | Docker image | Multi-stage build, digest-pinned bases, app runs as uid 10001, tini, HEALTHCHECK, no compiler toolchain |
 | Docker image (Wolfi) | Optional `Dockerfile.wolfi` variant on a digest-pinned Wolfi base (weekly Renovate bump) with the same user, entrypoint and pins, published as `*-wolfi` tags |
-| Image release | Every variant is Trivy-gated (debian and wolfi also smoke-tested) before push; images ship with an SBOM and max-mode provenance and every pushed digest is signed keyless with cosign, see [Verifying images](#verifying-images) |
+| Image release | Every variant is Trivy-gated (debian and wolfi also smoke-tested) before push, and the pushed amd64 and arm64 images are scanned again before any tag points at them; images ship with an SBOM and max-mode provenance and every pushed digest is signed keyless with cosign, see [Verifying images](#verifying-images) |
 | Source | SSO account linking, OAuth registration limits, XSS in OAuth URLs, OpenAPI DoS limits, admin-only cloud tools, session token kept out of URLs |
 
 ## Automation
@@ -32,12 +32,14 @@ This fork carries security changes that are not yet upstream:
   Unfixed Debian CVEs are reported but do not fail the build; they clear with base-image
   updates from Renovate.
 - **Build workflow** (`.github/workflows/build.yml`) publishes the debian, wolfi and full images
-  on `v*.*.*` tags (`edge*` on a manual run) to GHCR and, when `DOCKERHUB_USERNAME` and
-  `DOCKERHUB_TOKEN` are set, Docker Hub. Per variant it builds an amd64 image, runs
-  `scripts/docker-smoke.sh` (not for full, which runs as root by design) and the Trivy gate
-  (HIGH+ with a fix, `.trivyignore`); only then it pushes `linux/amd64` and `linux/arm64` from
-  the same build cache, checks that the pushed amd64 layers equal the scanned ones, and signs the
-  digest.
+  on `v*.*.*` tags (`edge*` on a manual run, which is only allowed from `main`) to GHCR and, when
+  `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are set, Docker Hub. `latest*` moves only on a
+  stable `vX.Y.Z` tag; a prerelease such as `v1.2.3-rc1` gets only its version tag. Per variant
+  it builds an amd64 image, runs `scripts/docker-smoke.sh` (not for full, which runs as root by
+  design) and the Trivy gate (HIGH+ with a fix, `.trivyignore`); only then it pushes
+  `linux/amd64` and `linux/arm64` from the same build cache by digest, with no tag. It checks that
+  the pushed amd64 layers equal the scanned ones, scans the pushed amd64 and arm64 images from
+  the registry with the same gate, and only then points the tags at the digest and signs it.
 
 ## Verifying images
 
@@ -52,12 +54,26 @@ GHCR name):
 
 ```bash
 cosign verify ghcr.io/marcschaeferger/mcphub:latest \
-  --certificate-identity-regexp '^https://github\.com/marcschaeferger/mcphub/\.github/workflows/build\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  --certificate-identity-regexp '^https://github\.com/marcschaeferger/mcphub/\.github/workflows/build\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-trigger push
 ```
 
-`edge*` images come from manual runs on a branch. Verify them with the identity
-`'^https://github\.com/marcschaeferger/mcphub/\.github/workflows/build\.yml@refs/heads/main$'`.
+`--certificate-github-workflow-trigger push` binds the event as well as the ref, so an image
+from a manual run can never pass as a release. To pin one release, also pass
+`--certificate-github-workflow-ref refs/tags/vX.Y.Z`.
+
+`edge*` images come from manual runs, which the workflow only allows on `main`. Verify them
+with:
+
+```bash
+cosign verify ghcr.io/marcschaeferger/mcphub:edge \
+  --certificate-identity https://github.com/marcschaeferger/mcphub/.github/workflows/build.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-trigger workflow_dispatch \
+  --certificate-github-workflow-ref refs/heads/main
+```
+
 A fork that publishes its own images replaces `marcschaeferger/mcphub` with its repository.
 
 To deploy what you verified, pin the digest (`ghcr.io/marcschaeferger/mcphub@sha256:...`) that

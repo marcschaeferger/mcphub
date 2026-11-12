@@ -1,6 +1,16 @@
 # Hardened MCPHub deployment with external MCP server containers.
 # See README.md. Start with:  docker compose up -d --build
 
+# MCPHub is built from the repository root: the upstream image
+# (samanhappy/mcphub:latest) has no uid-10001 user, /app/data or /home/mcphub
+# yet, so the volumes would be root-owned and unwritable for uid 10001.
+# MCPHUB_IMAGE only renames the build; point it at a prebuilt image that has
+# this layout and start without --build to use that image as is.
+x-mcphub-build: &mcphub-build
+  context: ../../..
+  args:
+    RUN_AS: "10001:10001"
+
 x-hardening: &hardening
   read_only: true
   cap_drop: [ALL]
@@ -13,7 +23,8 @@ services:
   # next to it), so the file cannot be a read-only bind mount. An existing
   # settings file is never overwritten.
   mcphub-seed:
-    image: ${MCPHUB_IMAGE:-samanhappy/mcphub:latest}
+    build: *mcphub-build
+    image: ${MCPHUB_IMAGE:-mcphub-example:local}
     user: "10001:10001"
     <<: *hardening
     restart: "no"
@@ -26,7 +37,8 @@ services:
     network_mode: none
 
   mcphub:
-    image: ${MCPHUB_IMAGE:-samanhappy/mcphub:latest}
+    build: *mcphub-build
+    image: ${MCPHUB_IMAGE:-mcphub-example:local}
     user: "10001:10001"
     <<: *hardening
     tmpfs:

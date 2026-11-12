@@ -9,7 +9,14 @@ docker compose logs mcphub | grep "Generated admin password"
 # UI: http://127.0.0.1:3000  (change the port with MCPHUB_PORT)
 ```
 
-Use `MCPHUB_IMAGE` to pick another image (default `samanhappy/mcphub:latest`).
+The MCPHub image is built from the repository root (`../../..`) with
+`RUN_AS=10001:10001`. The example needs an image that has the uid 10001
+`mcphub` user, `/app/data` and `/home/mcphub`; `samanhappy/mcphub:latest` does
+not have them yet, and with it the seed fails because the volumes are owned by
+root. Once a release with that layout exists, set `MCPHUB_IMAGE` to its tag
+and digest (`samanhappy/mcphub:<version>@sha256:<digest>`) and start without
+`--build`. With `--build`, Compose rebuilds from source and tags the result as
+`MCPHUB_IMAGE` (default `mcphub-example:local`).
 
 ## Why external containers
 

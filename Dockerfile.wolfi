@@ -1,0 +1,186 @@
+# syntax=docker/dockerfile:1.7
+
+# MCPHub image, Wolfi variant (tags: *-wolfi). Same build stages, entrypoint,
+# user model, labels and HEALTHCHECK as the Debian Dockerfile; only the runtime
+# base and its package manager differ. Every remaining difference is explained
+# next to the line that differs.
+#
+# Why Node.js does not come from Wolfi: the Wolfi `npm` package tracks the
+# newest npm major (currently 12) and the `nodejs-22` package lagged behind the
+# upstream 22.x security releases. npx launches stdio MCP servers, so Node and
+# npm are copied from the digest-pinned official Node image (glibc, same
+# release as the build stages) and npm is pinned to 11, exactly like the
+# Debian variant. Python, uv, git, tini, setpriv and procps come from Wolfi apk.
+#
+# Not supported here: --build-arg INSTALL_EXT=true (Playwright, Rust, Docker
+# engine). That needs apt and a root, privileged container: use the full
+# (Debian) variant instead.
+#
+# Base images are pinned by tag and digest so a rebuild cannot silently pick
+# up a different upstream image. Bump tag and digest together, e.g. with
+#   docker buildx imagetools inspect node:22.23.4-trixie-slim
+ARG NODE_IMAGE=node:22.23.4-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6
+# Wolfi (glibc, rolling) runtime base. The free cgr.dev images only publish
+# :latest, so the digest is the only stable reference; Renovate bumps it weekly.
+ARG WOLFI_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:94fa13e26d449f7d78dbcd02d12ea37a0da80d24fcc3e1f17b95d515dec607a7
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490
+
+FROM ${UV_IMAGE} AS uv
+FROM ${NODE_IMAGE} AS node
+
+# Node.js for the runtime image. The npm bundled with Node 22 ships
+# dependencies with known HIGH advisories (pacote, sigstore, brace-expansion),
+# so npm/npx (used to launch stdio MCP servers) is replaced by a pinned npm 11.
+FROM node AS node-runtime
+ARG NPM_VERSION=11.21.2
+RUN npm install -g "npm@${NPM_VERSION}" \
+  && npm cache clean --force \
+  && rm -rf /root/.npm
+
+# ---------------------------------------------------------------------------
+# build: full dependency tree (incl. devDependencies) to compile backend and
+# frontend. Nothing from this stage except build output reaches the runtime.
+# ---------------------------------------------------------------------------
+FROM node AS build
+WORKDIR /src
+# pnpm is resolved by Corepack from package.json "packageManager", which pins
+# the version together with its sha256.
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .pnpmfile.cjs ./
+COPY patches ./patches
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm install --frozen-lockfile --store-dir /pnpm/store
+COPY . .
+# The bundled servers.json is the default. Refreshing it from mcpm.sh pulls an
+# unverified remote file into the image, so it is opt-in. The upstream catalogue
+# carries real-looking example tokens, which are replaced with inert placeholders.
+ARG FETCH_LATEST_SERVERS=false
+RUN if [ "$FETCH_LATEST_SERVERS" = "true" ]; then \
+  node -e "fetch('https://mcpm.sh/api/servers.json',{signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);const t=await r.text();JSON.parse(t);require('fs').writeFileSync('servers.json',t)}).catch(e=>console.error('Failed to download servers.json, using bundled version:',e.message))" \
+  && sed -E -i \
+    -e 's/"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}"/"your_github_token_here"/g' \
+    -e 's/"sk_(test|live)_[A-Za-z0-9]{16,}"/"replace_with_your_secret_key"/g' \
+    -e 's/"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"/"<jwt-token>"/g' \
+    servers.json; \
+  fi \
+  && pnpm build
+
+# ---------------------------------------------------------------------------
+# prod-deps: production dependencies only (patches applied by pnpm).
+# ---------------------------------------------------------------------------
+FROM node AS prod-deps
+WORKDIR /src
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .pnpmfile.cjs ./
+COPY patches ./patches
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm install --prod --frozen-lockfile --store-dir /pnpm/store
+
+# ---------------------------------------------------------------------------
+# runtime (Wolfi). glibc-based, so the node_modules native addons built in the
+# Debian-based prod-deps stage (bcrypt, better-sqlite3, sharp) load unchanged:
+# Wolfi's glibc is newer than the Debian trixie glibc they were built against.
+# ---------------------------------------------------------------------------
+FROM ${WOLFI_IMAGE} AS runtime
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="MCPHub" \
+  org.opencontainers.image.description="Self-hosted MCP gateway and control plane" \
+  org.opencontainers.image.source="https://github.com/samanhappy/mcphub" \
+  org.opencontainers.image.licenses="Apache-2.0" \
+  org.opencontainers.image.version="${VERSION}"
+
+# The "full" variant is Debian only. Fail early with a pointer instead of
+# silently building an image without Playwright/Docker.
+ARG INSTALL_EXT=false
+RUN if [ "$INSTALL_EXT" = "true" ]; then \
+  echo "ERROR: INSTALL_EXT=true is not supported by Dockerfile.wolfi (Playwright, Rust and Docker-in-Docker need Debian and apt). Build the full variant from the Debian Dockerfile instead: docker build --build-arg INSTALL_EXT=true -f Dockerfile ." >&2; \
+  exit 1; \
+  fi
+
+# Runtime tools from Wolfi apk instead of apt: git (uvx/npx git+ sources),
+# procps (`ps` for tree-kill, #1072), tini (reaps stdio server processes), bash
+# and setpriv (entrypoint privilege drop; busybox lacks setpriv), curl (kept
+# for existing user healthchecks), python 3.13 with pip. uv/uvx are not taken
+# from apk: they come from the same pinned ghcr.io image as in the Debian variant.
+# libstdc++/libgcc are needed by the official Node binary. Versions are not
+# pinned on purpose: the digest-pinned base plus a fresh index picks up Wolfi
+# security updates on every rebuild (same policy as the Debian variant).
+# hadolint ignore=DL3018
+RUN apk upgrade --no-cache \
+  && apk add --no-cache bash ca-certificates-bundle curl git procps tini setpriv \
+    libstdc++ libgcc python-3.13 py3.13-pip \
+  && python3 --version
+
+# wolfi-base ships no bash, so the pipefail shell is only set once apk has
+# installed it (the Debian variant sets it first, its base already has bash).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Same pip pin as the Debian variant. Wolfi's py3.13-pip lags behind it (26.2.2
+# when this was written), so it is upgraded in place; uv/uvx do not use pip,
+# but users of the image may.
+ARG PIP_VERSION=26.3
+RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --upgrade "pip==${PIP_VERSION}"
+
+# Node.js + npm 11 from the official image (see the header comment).
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+  && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+  && corepack enable pnpm \
+  && node --version && npm --version && npx --version
+
+ARG MCPHUB_UID=10001
+ARG MCPHUB_GID=10001
+# busybox addgroup/adduser instead of groupadd/useradd; same uid, gid, home and shell.
+RUN addgroup -g "${MCPHUB_GID}" mcphub \
+  && adduser -D -u "${MCPHUB_UID}" -G mcphub -h /home/mcphub -s /bin/bash mcphub
+
+# No cargo/rustup/Playwright variables: those belong to the Debian-only full variant.
+ENV HOME=/home/mcphub \
+  PATH=/home/mcphub/.local/bin:$PATH
+
+WORKDIR /app
+
+COPY --from=prod-deps /src/node_modules ./node_modules
+COPY --from=build /src/dist ./dist
+COPY --from=build /src/frontend/dist ./frontend/dist
+COPY --from=build /src/servers.json ./servers.json
+COPY package.json ./
+COPY bin ./bin
+COPY locales ./locales
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# The application code stays root-owned and read-only for the runtime user;
+# only the data directory and HOME (npx/uvx caches, ~/.npmrc) are writable.
+RUN install -d -o mcphub -g mcphub -m 0750 /app/data
+
+# Pre-install the fetch server for the runtime user, into its HOME, so the
+# cache management in MCPHub can still refresh or remove it.
+USER ${MCPHUB_UID}:${MCPHUB_GID}
+RUN uv tool install --no-cache mcp-server-fetch
+
+# The container starts as root only so the entrypoint can hand root-owned
+# state (volumes from older images, daemon-created bind mounts) to the mcphub
+# user; it then runs MCPHub as uid ${MCPHUB_UID} via setpriv. It stays root
+# only for MCPHUB_RUN_AS_ROOT=true or
+# settings the mcphub user cannot write (see entrypoint.sh).
+# Strictly non-root platforms can run it with --user 10001:10001 /
+# runAsUser: 10001, or build it with --build-arg RUN_AS=10001:10001.
+ARG RUN_AS=0:0
+USER ${RUN_AS}
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+# Launch node directly instead of `pnpm start`: the pnpm shim resolves via
+# Corepack, which re-downloads pnpm into the runtime user's HOME cache when the
+# image runs as a non-root user, breaking startup in egress-restricted
+# environments (#1105).
+CMD ["node", "dist/index.js"]

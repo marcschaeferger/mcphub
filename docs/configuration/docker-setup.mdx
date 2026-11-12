@@ -37,18 +37,48 @@ MCPHub runs as the unprivileged `mcphub` user (uid/gid `10001`). The container s
 
 ### Image variants
 
-There are three image variants. Releases publish the debian and full variants. The wolfi variant is not published yet: build it yourself from `Dockerfile.wolfi`. The debian and wolfi variants run MCPHub as uid `10001`. The full variant runs as root.
-
-On pull requests to `main` and `develop`, pushes to `main` and a weekly schedule, the Security workflow builds a local amd64 image from `Dockerfile` and from `Dockerfile.wolfi`, smoke-tests both and scans them with Trivy. The images that releases publish are built separately by the Build workflow, multi-arch, and do not go through this smoke test and image scan.
+There are three image variants. Releases publish all three. The debian and wolfi variants run MCPHub as uid `10001`. The full variant runs as root.
 
 | Variant | Tags | Dockerfile | Use it when |
 | --- | --- | --- | --- |
 | debian | `latest`, `X.Y.Z`, `edge` | `Dockerfile` | Default choice. Debian base, `apt-get` available for derived images. |
-| wolfi | none, build from source | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
+| wolfi | `latest-wolfi`, `X.Y.Z-wolfi`, `edge-wolfi` | `Dockerfile.wolfi` | You want the smallest set of OS packages and fewest known vulnerabilities. Wolfi base (glibc), updated continuously. |
 | full | `latest-full`, `X.Y.Z-full`, `edge-full` | `Dockerfile` with `INSTALL_EXT=true` | Playwright browsers, Rust/Cargo or Docker-in-Docker are needed. Runs as root, see below. |
 
+#### Tags and registries
+
+The Build workflow (`.github/workflows/build.yml`) publishes the images:
+
+| Trigger | debian | wolfi | full |
+| --- | --- | --- | --- |
+| Git tag `vX.Y.Z` | `latest`, `X.Y.Z` | `latest-wolfi`, `X.Y.Z-wolfi` | `latest-full`, `X.Y.Z-full` |
+| Git tag `vX.Y.Z-<pre>` (prerelease, e.g. `v1.2.3-rc1`) | `X.Y.Z-<pre>` | `X.Y.Z-<pre>-wolfi` | `X.Y.Z-<pre>-full` |
+| Manual run (workflow_dispatch, `main` only) | `edge` | `edge-wolfi` | not built |
+
+A manual run from any other branch or tag fails before building, so `edge` always comes from `main`.
+
+Every image is pushed for `linux/amd64` and `linux/arm64` to GHCR (`ghcr.io/<owner>/<repo>`) and, if configured, to Docker Hub. Before anything is pushed, each variant is built for amd64, started by `scripts/docker-smoke.sh` (healthy, uid `10001`, login, one `uvx` and one `npx` server, a tool call) and scanned by Trivy, failing on HIGH or CRITICAL findings that have a fix. The full variant skips the smoke test because it runs as root by design, but it is scanned. The multi-arch image is then pushed by digest without any tag; its amd64 and arm64 images are scanned again from the registry with the same settings, and only then are the tags above pointed at it. Pushed images carry an SBOM and build provenance and are signed with cosign; see [Verifying images](https://github.com/marcschaeferger/mcphub/blob/main/SECURITY.md#verifying-images) in `SECURITY.md`.
+
+The same images are on both registries under the same digest:
+
 ```bash
-# Build the Wolfi variant from a checkout of this repository
+docker pull ghcr.io/marcschaeferger/mcphub:latest-wolfi
+```
+
+#### Publishing from a fork
+
+GHCR needs no setup: the workflow pushes to `ghcr.io/<owner>/<repo>` (lowercased) with the built-in `GITHUB_TOKEN`. Docker Hub is optional. Configure it under **Settings → Secrets and variables → Actions**:
+
+| Name | Kind | Required | Purpose |
+| --- | --- | --- | --- |
+| `DOCKERHUB_USERNAME` | Secret | For Docker Hub | Docker Hub user that pushes the images. |
+| `DOCKERHUB_TOKEN` | Secret | For Docker Hub | Docker Hub access token with read and write scope (not the account password). |
+| `DOCKERHUB_IMAGE` | Variable | No | Docker Hub repository, e.g. `myuser/mcphub`. Defaults to `<owner>/<repo>`. |
+
+If either secret is missing, the workflow skips Docker Hub with a notice and still publishes and signs the GHCR images.
+
+```bash
+# Or build the Wolfi variant from a checkout of this repository
 docker build -f Dockerfile.wolfi -t mcphub:wolfi .
 ```
 

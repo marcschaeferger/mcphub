@@ -14,6 +14,7 @@ This fork carries security changes that are not yet upstream:
 | --- | --- |
 | Dependencies | MCP SDK 2.4.0 with a rebased client patch; `pnpm.overrides` pin transitive dependencies to fixed versions |
 | Docker image | Multi-stage build, digest-pinned bases, app runs as uid 10001, tini, HEALTHCHECK, no compiler toolchain |
+| Docker image (Wolfi) | Optional `Dockerfile.wolfi` variant on a digest-pinned Wolfi base (weekly Renovate bump) with the same user, entrypoint and pins; CI builds, smoke-tests and Trivy-scans it next to the Debian image |
 | Source | SSO account linking, OAuth registration limits, XSS in OAuth URLs, OpenAPI DoS limits, admin-only cloud tools, session token kept out of URLs |
 
 ## Automation

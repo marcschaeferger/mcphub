@@ -34,8 +34,13 @@ them as `streamable-http` upstreams.
 | `fetch-gateway` | stdio-only `mcp-server-fetch` behind `mcp-proxy`, served as `/mcp` and `/sse` (built from `fetch-gateway/`) |
 | `mcphub-seed` | one-shot, copies `mcp_settings.json` into the data volume if none exists |
 
-Versions are pinned and installed at build time, from digest-pinned base
-images. Nothing is downloaded when the MCP server containers start.
+The top-level packages (`server-everything`, `mcp-proxy`,
+`mcp-server-fetch`) are version-pinned and installed at build time, from
+digest-pinned base images. Nothing is downloaded when the MCP server containers
+start. Their transitive npm and pip dependencies are not locked and resolve to
+the newest matching versions at build time. For reproducible builds, add a
+`package-lock.json` (`npm ci`) and hash-pinned requirements
+(`pip install --require-hashes -r ...`).
 
 ## What the flags do
 
@@ -75,14 +80,28 @@ Notes on the example:
 The `everything` and `fetch-gateway` HTTP endpoints accept any caller that can
 reach them. That is why they sit only on the internal `mcp` network with no
 published ports. Do not publish them. For defence in depth, enable a bearer
-token on the gateway and send it from MCPHub:
+token on the gateway and send it from MCPHub.
+
+Put the token in a `.env` file next to `compose.yaml` (keep it out of git):
+
+```bash
+echo "FETCH_GATEWAY_TOKEN=$(openssl rand -hex 32)" > .env
+```
+
+Pass it to both services in `compose.yaml`. Each service needs its own
+`environment:` entry. If only the gateway gets it, MCPHub gets 401 responses:
 
 ```yaml
-# compose.yaml: set the same variable on fetch-gateway and on mcphub
-environment:
-  MCP_PROXY_AUTH_TOKEN: ${FETCH_GATEWAY_TOKEN}   # fetch-gateway; keep the value in .env, not in git
-  FETCH_GATEWAY_TOKEN: ${FETCH_GATEWAY_TOKEN}    # mcphub, expanded in the settings below
+services:
+  fetch-gateway:
+    environment:
+      MCP_PROXY_AUTH_TOKEN: ${FETCH_GATEWAY_TOKEN}
+  mcphub:
+    environment:
+      FETCH_GATEWAY_TOKEN: ${FETCH_GATEWAY_TOKEN}   # expanded in the settings below
 ```
+
+Add the header to the `fetch` server in the settings:
 
 ```json
 "fetch": {
@@ -93,6 +112,11 @@ environment:
 }
 ```
 
+`mcphub-seed` never overwrites an existing settings file, so editing
+`mcp_settings.json` here only takes effect on a fresh volume. On a running
+setup, add the header in the UI, or run `docker compose down -v` (this deletes
+all MCPHub data) and start again to re-seed.
+
 ## Never mount the Docker socket
 
 Do not mount `/var/run/docker.sock` into MCPHub or any MCP server. Access to the
@@ -100,8 +124,10 @@ socket is root on the host and undoes every flag above.
 
 ## Upgrading from old root images
 
-See the migration notes. Ownership of the existing data must belong to uid/gid
-10001, for example:
+See the uid 10001 paragraph in the
+[Docker setup guide](../../../docs/configuration/docker-setup.mdx). With this
+example, MCPHub never runs as root, so it cannot fix ownership itself. The
+existing data must belong to uid/gid 10001, for example:
 
 ```bash
 docker run --rm -v mcphub-data:/d alpine chown -R 10001:10001 /d

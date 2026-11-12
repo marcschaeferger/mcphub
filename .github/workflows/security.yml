@@ -41,9 +41,26 @@ jobs:
           exit-code: "1"
           format: table
 
+      - name: Dockerfile.wolfi misconfiguration (fail on HIGH+)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-target: Dockerfile.wolfi
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table
+
   image:
-    name: Trivy image scan
+    name: Image scan (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: debian
+            dockerfile: Dockerfile
+          - variant: wolfi
+            dockerfile: Dockerfile.wolfi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,15 +72,19 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           load: true
           push: false
-          tags: mcphub:scan
+          tags: mcphub:scan-${{ matrix.variant }}
+
+      - name: Smoke test (healthy, uid 10001, login, uvx and npx servers, tool call)
+        run: scripts/docker-smoke.sh mcphub:scan-${{ matrix.variant }}
 
       - name: Scan image (fail on HIGH+ with a fix)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: mcphub:scan
+          image-ref: mcphub:scan-${{ matrix.variant }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true

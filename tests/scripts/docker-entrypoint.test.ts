@@ -116,6 +116,7 @@ describe('Docker entrypoint', () => {
         'docker compose run --rm --user 0:0 <service> mcphub-migrate',
       );
       expect(result.stderr).toContain('fsGroup: 10001 and fsGroupChangePolicy: OnRootMismatch');
+      expect(result.stderr).toContain('sudo chown -R 10001:10001 ./data');
     });
 
     asNonRoot('exits 1 when the settings file is read-only', () => {

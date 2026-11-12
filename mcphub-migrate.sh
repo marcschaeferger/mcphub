@@ -190,6 +190,11 @@ if $dry_run; then
 else
   echo "Summary: ${changed} entries handed to ${owner}, ${copied} legacy files copied, ${foreign} entries of other owners left unchanged."
 fi
+if [ "$foreign" -gt 0 ]; then
+  echo "Entries owned by another uid (for example a ./data directory created by the host user) are"
+  echo "never changed. If MCPHub still cannot write them, hand them to uid ${target_uid} on the host:"
+  echo "  sudo chown -R ${owner} ./data"
+fi
 if [ "$failed" -ne 0 ]; then
   echo "mcphub-migrate: some changes failed, see the errors above" >&2
   exit 1

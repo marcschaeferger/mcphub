@@ -33,7 +33,7 @@ Existing file mounts at `/app/mcp_settings.json` are detected automatically and 
 
 #### Unprivileged user
 
-The debian and wolfi images run as the unprivileged `mcphub` user (uid/gid `10001`) from the first process on. Nothing in the container switches users or changes file owners at runtime. MCPHub needs to write `/app/data` and, in file mode, the settings file and its sidecars (`.credentials.json`, `.credentials.key`, `.approvals.json`, `.capabilities.json`). If it cannot, the container exits with code 1 and prints the fix. Database mode (`DB_URL` or `USE_DB=true`) only needs `/app/data`, so the settings file can be a read-only mount there. A new named volume or an empty `./data` directory that uid `10001` can write works as is.
+The debian and wolfi images run as the unprivileged `mcphub` user (uid/gid `10001`) from the first process on. Nothing in the container switches users or changes file owners at runtime. MCPHub needs to write `/app/data` and, in file mode, the settings file and its sidecars (`.credentials.json`, `.credentials.key`, `.approvals.json`, `.capabilities.json`). If it cannot, the container exits with code 1 and prints the fix. Database mode (`DB_URL` or `USE_DB=true`) only needs `/app/data`, so the settings file can be a read-only mount there. A new named volume works as is. A `./data` bind mount must be writable for uid `10001`; a directory the host user created is not, so hand it over once on the host with `sudo chown -R 10001:10001 ./data`.
 
 Running the image as root (`--user 0:0`, `user: "0:0"`, `runAsUser: 0`) still works, but the entrypoint logs a warning on every start. Set `MCPHUB_RUN_AS_ROOT=true` to silence that warning when root is deliberate. The `full` image is built to run as root, because it starts the Docker daemon, and does not warn.
 
@@ -57,6 +57,8 @@ docker compose up -d
 ```
 
 `mcphub-migrate` hands every entry owned by uid `0` in the `/app/data` mount and in directory mounts at or below `/home/mcphub` (the npm and uv caches) to `10001:10001`. It changes symlinks themselves and never follows them. Anything mounted separately below `/app/data` (a host directory, a single file such as a socket) is only listed and left unchanged; pass `--include-mounts` to hand over such directories too. Mounted single files are never changed. It never touches files owned by any other uid. It prints a summary, exits 0, and changes nothing when run again. Remove any `user: "0:0"` (or `--user 0`) you added for older images.
+
+**Host directory owned by the host user.** If `./data` was created by your host user (not by root), `mcphub-migrate` reports its entries as owned by another uid and leaves them alone, and MCPHub still cannot write them. Hand the directory to uid `10001` on the host once: `sudo chown -R 10001:10001 ./data`.
 
 **Settings file mounted at `/app/mcp_settings.json`.** MCPHub writes its sidecar files next to the settings file. In `/app` uid `10001` cannot create them, so this layout stops working. `mcphub-migrate` does not change the host file. If `/app/data/mcp_settings.json` does not exist yet, it copies the file and any sidecars that are mounted next to it into `/app/data` (mode `0600`, owner `10001`). Then remove the `/app/mcp_settings.json` mount, and any `MCPHUB_SETTING_PATH` that points to it. If `/app/data/mcp_settings.json` already exists, it is left alone: compare the two files and keep the one you want in `/app/data`.
 

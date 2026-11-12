@@ -79,6 +79,8 @@ if [ "${EUID}" -ne 0 ]; then
       echo "  docker run:  docker run --rm --user 0:0 -v <volume>:/app/data <image> mcphub-migrate"
       echo "  compose:     docker compose run --rm --user 0:0 <service> mcphub-migrate"
       echo "  Kubernetes:  set the pod securityContext fsGroup: 10001 and fsGroupChangePolicy: OnRootMismatch"
+      echo "A host directory owned by a host user (for example ./data) is not changed by mcphub-migrate;"
+      echo "hand it to uid 10001 on the host instead:  sudo chown -R 10001:10001 ./data"
       echo "Add --dry-run to mcphub-migrate to list the changes first. A settings file mounted at"
       echo "/app/mcp_settings.json has to move into /app/data; mcphub-migrate explains how."
     } >&2
